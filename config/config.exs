@@ -9,7 +9,8 @@ import Config
 
 config :sms_gateway,
   ecto_repos: [SmsGateway.Repo],
-  generators: [timestamp_type: :utc_datetime]
+  generators: [timestamp_type: :utc_datetime],
+  ash_domains: [SmsGateway.Sms]
 
 # Configure the endpoint
 config :sms_gateway, SmsGatewayWeb.Endpoint,
