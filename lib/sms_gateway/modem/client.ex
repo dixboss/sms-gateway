@@ -1,26 +1,35 @@
 defmodule SmsGateway.Modem.Client do
   @moduledoc """
-  HTTP client for Huawei E303 modem with circuit breaker pattern.
+  HTTP client for Huawei E303 modem with circuit breaker pattern and session token management.
 
   Provides functions to:
-  - Send SMS via modem API
+  - Send SMS via modem API (with XML request format)
   - List incoming SMS messages
   - Check message delivery status
   - Monitor modem health
+  - Manage session tokens for authentication
 
   Circuit breaker protects against repeated calls to a failing modem:
   - :closed (normal operation)
   - :open (5 consecutive failures -> back off for 5 minutes)
   - :half_open (testing if modem is back online)
+
+  Session Token Management:
+  - Tokens are fetched from /api/webserver/token before each request
+  - Tokens are cached in ETS with TTL (5 minutes)
+  - All requests include __RequestVerificationToken header
   """
 
   require Logger
   import SweetXml
 
   @circuit_breaker_key :modem_circuit_breaker
+  @token_cache_key :modem_session_token
   @max_failures 5
   # 5 minutes in ms
   @backoff_duration 300_000
+  # 5 minutes in ms
+  @token_ttl 300_000
   # 10 seconds
   @timeout 10_000
 
@@ -108,6 +117,91 @@ defmodule SmsGateway.Modem.Client do
     Logger.info("Circuit breaker reset")
   end
 
+  @doc """
+  Clear cached session token (for testing or when token expires).
+  """
+  def clear_token_cache do
+    ensure_token_cache_table()
+    :ets.delete(@token_cache_key, :token)
+    Logger.debug("Session token cache cleared")
+  end
+
+  # ============================================================================
+  # Session Token Management
+  # ============================================================================
+
+  defp get_session_token do
+    ensure_token_cache_table()
+
+    case :ets.lookup(@token_cache_key, :token) do
+      [{:token, token, expires_at}] ->
+        if System.monotonic_time(:millisecond) < expires_at do
+          {:ok, token}
+        else
+          Logger.debug("Session token expired, fetching new one")
+          fetch_new_token()
+        end
+
+      [] ->
+        fetch_new_token()
+    end
+  end
+
+  defp fetch_new_token do
+    base_url = config(:modem_base_url, "http://192.168.8.1")
+    url = "#{base_url}/api/webserver/token"
+
+    case HTTPoison.get(url, [], timeout: @timeout) do
+      {:ok, %{status_code: 200, body: body}} ->
+        case parse_token_response(body) do
+          {:ok, token} ->
+            cache_token(token)
+            {:ok, token}
+
+          {:error, reason} ->
+            Logger.error("Failed to parse token: #{inspect(reason)}")
+            {:error, :token_parse_failed}
+        end
+
+      {:ok, %{status_code: status}} ->
+        Logger.error("Token request failed with status: #{status}")
+        {:error, {:http_error, status}}
+
+      {:error, reason} ->
+        Logger.error("Token request failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp parse_token_response(body) do
+    try do
+      token = xpath(body, ~x"//response/token/text()"s)
+
+      if token && token != "" do
+        {:ok, token}
+      else
+        {:error, :token_not_found}
+      end
+    rescue
+      e ->
+        Logger.error("XML parsing error: #{inspect(e)}")
+        {:error, :xml_parse_error}
+    end
+  end
+
+  defp cache_token(token) do
+    ensure_token_cache_table()
+    expires_at = System.monotonic_time(:millisecond) + @token_ttl
+    :ets.insert(@token_cache_key, {:token, token, expires_at})
+    Logger.debug("Session token cached until #{expires_at}")
+  end
+
+  defp ensure_token_cache_table do
+    unless :ets.whereis(@token_cache_key) != :undefined do
+      :ets.new(@token_cache_key, [:named_table, :public, :set])
+    end
+  end
+
   # ============================================================================
   # Implementation Functions
   # ============================================================================
@@ -116,18 +210,9 @@ defmodule SmsGateway.Modem.Client do
     base_url = config(:modem_base_url, "http://192.168.8.1")
     url = "#{base_url}/api/sms/send-sms"
 
-    body =
-      URI.encode_query(%{
-        "phones[Phone]" => phone_number,
-        "content" => content,
-        "encode_type" => "gsm7_default"
-      })
-
-    headers = [
-      {"Content-Type", "application/x-www-form-urlencoded"}
-    ]
-
-    with {:ok, response} <- HTTPoison.post(url, body, headers, timeout: @timeout),
+    with {:ok, token} <- get_session_token(),
+         {:ok, xml_body} <- build_sms_xml(phone_number, content),
+         {:ok, response} <- send_authenticated_request(url, xml_body, token),
          {:ok, message_id} <- parse_send_sms_response(response.body) do
       {:ok, message_id}
     else
@@ -135,11 +220,43 @@ defmodule SmsGateway.Modem.Client do
     end
   end
 
+  defp build_sms_xml(phone_number, content) do
+    length = String.length(content)
+    time = DateTime.utc_now() |> DateTime.to_string()
+
+    xml = """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <request>
+      <Index>-1</Index>
+      <Phones>
+        <Phone>#{phone_number}</Phone>
+      </Phones>
+      <Sca></Sca>
+      <Content>#{content}</Content>
+      <Length>#{length}</Length>
+      <Reserved>1</Reserved>
+      <Date>#{time}</Date>
+    </request>
+    """
+
+    {:ok, xml}
+  end
+
+  defp send_authenticated_request(url, body, token) do
+    headers = [
+      {"Content-Type", "application/xml"},
+      {"__RequestVerificationToken", token}
+    ]
+
+    HTTPoison.post(url, body, headers, timeout: @timeout)
+  end
+
   defp list_sms_impl(box_type) do
     base_url = config(:modem_base_url, "http://192.168.8.1")
     url = "#{base_url}/api/sms/sms-list?page=1&count=20&box_type=#{box_type}"
 
-    with {:ok, response} <- HTTPoison.get(url, [], timeout: @timeout),
+    with {:ok, token} <- get_session_token(),
+         {:ok, response} <- send_authenticated_get(url, token),
          {:ok, messages} <- parse_list_sms_response(response.body) do
       {:ok, messages}
     else
@@ -147,11 +264,20 @@ defmodule SmsGateway.Modem.Client do
     end
   end
 
+  defp send_authenticated_get(url, token) do
+    headers = [
+      {"__RequestVerificationToken", token}
+    ]
+
+    HTTPoison.get(url, headers, timeout: @timeout)
+  end
+
   defp get_status_impl(modem_message_id) do
     base_url = config(:modem_base_url, "http://192.168.8.1")
     url = "#{base_url}/api/sms/send-status?message_id=#{modem_message_id}"
 
-    with {:ok, response} <- HTTPoison.get(url, [], timeout: @timeout),
+    with {:ok, token} <- get_session_token(),
+         {:ok, response} <- send_authenticated_get(url, token),
          {:ok, status} <- parse_get_status_response(response.body) do
       {:ok, status}
     else
@@ -163,7 +289,8 @@ defmodule SmsGateway.Modem.Client do
     base_url = config(:modem_base_url, "http://192.168.8.1")
     url = "#{base_url}/api/monitoring/status"
 
-    with {:ok, response} <- HTTPoison.get(url, [], timeout: @timeout),
+    with {:ok, token} <- get_session_token(),
+         {:ok, response} <- send_authenticated_get(url, token),
          {:ok, health_info} <- parse_health_check_response(response.body) do
       {:ok, health_info}
     else
@@ -176,74 +303,70 @@ defmodule SmsGateway.Modem.Client do
   # ============================================================================
 
   defp parse_send_sms_response(body) do
-    case SweetXml.parse(body) do
-      {:ok, xml} ->
-        case SweetXml.xpath(xml, ~x"//message_id/text()"s) do
-          nil -> {:error, :invalid_response}
-          message_id -> {:ok, message_id}
-        end
+    try do
+      message_id = xpath(body, ~x"//response/message_id/text()"s)
 
-      {:error, _} ->
-        {:error, :parse_error}
+      if message_id && message_id != "" do
+        {:ok, message_id}
+      else
+        {:error, :invalid_response}
+      end
+    rescue
+      _ -> {:error, :parse_error}
     end
   end
 
   defp parse_list_sms_response(body) do
-    case SweetXml.parse(body) do
-      {:ok, xml} ->
-        messages =
-          SweetXml.xpath(xml, ~x"//messages/message"l) |> Enum.map(&parse_sms_message/1)
+    try do
+      messages =
+        xpath(body, ~x"//response/messages/message"l,
+          index: ~x"./index/text()"s,
+          phone: ~x"./phone/text()"s,
+          content: ~x"./content/text()"s,
+          date: ~x"./date/text()"s,
+          status: ~x"./status/text()"s
+        )
+        |> Enum.map(&parse_message_struct/1)
 
-        {:ok, messages}
-
-      {:error, _} ->
-        {:error, :parse_error}
+      {:ok, messages}
+    rescue
+      _ -> {:error, :parse_error}
     end
   end
 
-  defp parse_sms_message(message_xml) do
+  defp parse_message_struct(msg_data) do
     %{
-      index: SweetXml.xpath(message_xml, ~x"//index/text()"s) |> String.to_integer(),
-      phone: SweetXml.xpath(message_xml, ~x"//phone/text()"s),
-      content: SweetXml.xpath(message_xml, ~x"//content/text()"s),
-      date: SweetXml.xpath(message_xml, ~x"//date/text()"s),
-      status: SweetXml.xpath(message_xml, ~x"//status/text()"s)
+      index: safe_to_integer(msg_data.index),
+      phone: msg_data.phone,
+      content: msg_data.content,
+      date: msg_data.date,
+      status: msg_data.status
     }
-  rescue
-    # If parsing individual message fails, log and return minimal info
-    e ->
-      Logger.warning("Failed to parse SMS message: #{inspect(e)}")
-      %{}
   end
 
   defp parse_get_status_response(body) do
-    case SweetXml.parse(body) do
-      {:ok, xml} ->
-        status_str = SweetXml.xpath(xml, ~x"//status/text()"s)
-        status_atom = parse_status_string(status_str)
-        {:ok, status_atom}
-
-      {:error, _} ->
-        {:error, :parse_error}
+    try do
+      status_str = xpath(body, ~x"//response/status/text()"s)
+      status_atom = parse_status_string(status_str)
+      {:ok, status_atom}
+    rescue
+      _ -> {:error, :parse_error}
     end
   end
 
   defp parse_health_check_response(body) do
-    case SweetXml.parse(body) do
-      {:ok, xml} ->
-        health_info = %{
-          signal_strength:
-            SweetXml.xpath(xml, ~x"//signal_strength/text()"s) |> safe_to_integer(),
-          network_type: SweetXml.xpath(xml, ~x"//network_type/text()"s),
-          network_name: SweetXml.xpath(xml, ~x"//network_name/text()"s),
-          battery_level: SweetXml.xpath(xml, ~x"//battery_level/text()"s) |> safe_to_integer(),
-          connection_status: SweetXml.xpath(xml, ~x"//connection_status/text()"s)
-        }
+    try do
+      health_info = %{
+        signal_strength: xpath(body, ~x"//response/signal_strength/text()"s) |> safe_to_integer(),
+        network_type: xpath(body, ~x"//response/network_type/text()"s),
+        network_name: xpath(body, ~x"//response/network_name/text()"s),
+        battery_level: xpath(body, ~x"//response/battery_level/text()"s) |> safe_to_integer(),
+        connection_status: xpath(body, ~x"//response/connection_status/text()"s)
+      }
 
-        {:ok, health_info}
-
-      {:error, _} ->
-        {:error, :parse_error}
+      {:ok, health_info}
+    rescue
+      _ -> {:error, :parse_error}
     end
   end
 
@@ -262,10 +385,14 @@ defmodule SmsGateway.Modem.Client do
   defp safe_to_integer(nil), do: nil
 
   defp safe_to_integer(str) when is_binary(str) do
-    String.to_integer(str)
-  rescue
-    ArgumentError -> nil
+    case Integer.parse(str) do
+      {int, _} -> int
+      :error -> nil
+    end
   end
+
+  defp safe_to_integer(int) when is_integer(int), do: int
+  defp safe_to_integer(_), do: nil
 
   # ============================================================================
   # Circuit Breaker Logic
@@ -277,7 +404,6 @@ defmodule SmsGateway.Modem.Client do
         elapsed = System.monotonic_time(:millisecond) - opened_at
 
         if elapsed > @backoff_duration do
-          # Transition to :half_open after backoff
           Logger.info("Circuit breaker entering half-open state after backoff")
           :persistent_term.put(@circuit_breaker_key, %CircuitBreaker{state: :half_open})
           false
