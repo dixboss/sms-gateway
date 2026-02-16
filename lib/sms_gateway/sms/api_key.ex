@@ -72,7 +72,8 @@ defmodule SmsGateway.Sms.ApiKey do
 
         # Generate a new secret key (32 bytes random)
         secret_key = :crypto.strong_rand_bytes(32) |> Base.encode16(case: :lower)
-        prefix = "sk_live_" <> String.slice(secret_key, 0..16)
+        # Prefix: "sk_live_" (8 chars) + 11 chars = 19 chars total (under 20 limit)
+        prefix = "sk_live_" <> String.slice(secret_key, 0..10)
         key_hash = Bcrypt.hash_pwd_salt(secret_key)
 
         changeset

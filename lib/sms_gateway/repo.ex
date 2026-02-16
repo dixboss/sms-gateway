@@ -8,4 +8,7 @@ defmodule SmsGateway.Repo do
     # Add extensions as needed (e.g., "uuid-ossp" for UUID generation)
     []
   end
+
+  # Required by AshPostgres 2.6.32+ for atomic actions control
+  def disable_atomic_actions?, do: false
 end
