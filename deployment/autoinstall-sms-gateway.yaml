@@ -1,0 +1,951 @@
+#cloud-config
+autoinstall:
+  version: 1
+
+  # Locale et clavier
+  locale: fr_FR.UTF-8
+  keyboard:
+    layout: fr
+
+  # Identité du serveur
+  identity:
+    hostname: cgh-smsg
+    username: localadmin
+    password: "$6$lJRck/fN7z6"
+
+  # Timezone
+  timezone: Africa/Brazzaville
+
+  # Configuration réseau statique
+  network:
+    version: 2
+    ethernets:
+      ens18:  # Adapter selon l'interface (ens18, ens33, eth0, etc.)
+        dhcp4: false
+        addresses:
+          - 10.2.0.203/24
+        routes:
+          - to: default
+            via: 10.2.0.254
+        nameservers:
+          addresses:
+            - 10.2.0.200
+            - 192.168.5.200
+          search:
+            - congo-handling.aero
+
+  # Configuration du stockage - 1TB avec LVM
+  storage:
+    layout:
+      name: lvm
+    config:
+      - type: disk
+        id: disk0
+        ptable: gpt
+        wipe: superblock
+        grub_device: true
+      - type: partition
+        id: boot-partition
+        device: disk0
+        size: 1G
+        flag: boot
+        grub_device: true
+      - type: partition
+        id: root-partition
+        device: disk0
+        size: -1  # Utilise tout l'espace restant
+      - type: lvm_volgroup
+        id: vg0
+        name: vg0
+        devices:
+          - root-partition
+      - type: lvm_partition
+        id: lv-root
+        name: lv-root
+        volgroup: vg0
+        size: 50G
+      - type: lvm_partition
+        id: lv-var
+        name: lv-var
+        volgroup: vg0
+        size: 500G  # Pour logs Zabbix + PostgreSQL data
+      - type: lvm_partition
+        id: lv-home
+        name: lv-home
+        volgroup: vg0
+        size: 20G
+      - type: lvm_partition
+        id: lv-swap
+        name: lv-swap
+        volgroup: vg0
+        size: 8G
+      # Espace libre restant (~720G) pour expansion future
+      - type: format
+        id: fs-boot
+        volume: boot-partition
+        fstype: ext4
+      - type: format
+        id: fs-root
+        volume: lv-root
+        fstype: ext4
+      - type: format
+        id: fs-var
+        volume: lv-var
+        fstype: ext4
+      - type: format
+        id: fs-home
+        volume: lv-home
+        fstype: ext4
+      - type: format
+        id: fs-swap
+        volume: lv-swap
+        fstype: swap
+      - type: mount
+        id: mount-boot
+        device: fs-boot
+        path: /boot
+      - type: mount
+        id: mount-root
+        device: fs-root
+        path: /
+      - type: mount
+        id: mount-var
+        device: fs-var
+        path: /var
+      - type: mount
+        id: mount-home
+        device: fs-home
+        path: /home
+      - type: mount
+        id: mount-swap
+        device: fs-swap
+        path: swap
+
+  # SSH Server
+  ssh:
+    install-server: true
+    allow-pw: true
+
+  # Paquets de base
+  packages:
+    - nginx
+    - postgresql
+    - postgresql-contrib
+    - git
+    - curl
+    - wget
+    - htop
+    - vim
+    - ufw
+    - unzip
+    - build-essential
+    - libssl-dev
+    - libncurses5-dev
+    - automake
+    - autoconf
+    - libreadline-dev
+    - ca-certificates
+    - gnupg
+    - jq
+    - fping
+    - snmp
+    - snmpd
+    - libsnmp-dev
+    - postfix
+    - mailutils
+    # USB et modem dependencies
+    - usb-modeswitch
+    - usb-modeswitch-data
+    - libusb-1.0-0
+    - libusb-1.0-0-dev
+    - usbutils
+    - ppp
+    - wvdial
+    # XML parsing
+    - libxml2-dev
+    - libxslt1-dev
+
+  # Mises à jour automatiques
+  updates: security
+
+  # Scripts post-installation
+  late-commands:
+    # Mise à jour système
+    - curtin in-target --target=/target -- apt-get update
+    - curtin in-target --target=/target -- apt-get upgrade -y
+
+    # Installer Node.js 22
+    - curtin in-target --target=/target -- bash -c "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -"
+    - curtin in-target --target=/target -- apt-get install -y nodejs
+
+    # Installer Erlang/OTP 27+ et Elixir via asdf
+    - curtin in-target --target=/target -- su - localadmin -c "git clone https://github.com/asdf-vm/asdf.git ~/.asdf --branch v0.14.0"
+    - curtin in-target --target=/target -- su - localadmin -c "echo '. \$HOME/.asdf/asdf.sh' >> ~/.bashrc"
+    - curtin in-target --target=/target -- su - localadmin -c "echo '. \$HOME/.asdf/completions/asdf.bash' >> ~/.bashrc"
+    - curtin in-target --target=/target -- su - localadmin -c "source ~/.asdf/asdf.sh && asdf plugin add erlang && asdf plugin add elixir"
+    # IMPORTANT: Erlang 27.2+ pour OTP 27
+    - curtin in-target --target=/target -- su - localadmin -c "source ~/.asdf/asdf.sh && asdf install erlang 27.2 && asdf global erlang 27.2"
+    - curtin in-target --target=/target -- su - localadmin -c "source ~/.asdf/asdf.sh && asdf install elixir 1.17.3-otp-27 && asdf global elixir 1.17.3-otp-27"
+
+    # Installer Phoenix et outils Elixir
+    - curtin in-target --target=/target -- su - localadmin -c "source ~/.asdf/asdf.sh && mix local.hex --force && mix local.rebar --force && mix archive.install hex phx_new --force"
+
+    # Ajouter repository Zabbix 7.0 LTS
+    - curtin in-target --target=/target -- wget https://repo.zabbix.com/zabbix/7.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_7.0-1+ubuntu24.04_all.deb -O /target/tmp/zabbix-release.deb
+    - curtin in-target --target=/target -- dpkg -i /tmp/zabbix-release.deb
+    - curtin in-target --target=/target -- apt-get update
+
+    # Installer Zabbix Server PostgreSQL, Frontend PHP, Agent2
+    - curtin in-target --target=/target -- apt-get install -y zabbix-server-pgsql zabbix-frontend-php zabbix-nginx-conf zabbix-sql-scripts zabbix-agent2
+
+    # Créer DB Zabbix avec mot de passe automatique
+    - curtin in-target --target=/target -- su - postgres -c "psql -c \"CREATE USER zabbix WITH PASSWORD 'ZabbixSecure2024!';\""
+    - curtin in-target --target=/target -- su - postgres -c "psql -c \"CREATE DATABASE zabbix OWNER zabbix;\""
+    - curtin in-target --target=/target -- su - postgres -c "zcat /usr/share/zabbix-sql-scripts/postgresql/server.sql.gz | psql -U postgres zabbix"
+
+    # Configuration Zabbix Server
+    - |
+      cat > /target/etc/zabbix/zabbix_server.conf << 'ZABBIXCONF'
+      LogFile=/var/log/zabbix/zabbix_server.log
+      LogFileSize=100
+      PidFile=/run/zabbix/zabbix_server.pid
+      SocketDir=/run/zabbix
+      DBHost=localhost
+      DBName=zabbix
+      DBUser=zabbix
+      DBPassword=ZabbixSecure2024!
+      StartPollers=10
+      StartPollersUnreachable=5
+      StartTrappers=5
+      StartPingers=10
+      StartDiscoverers=3
+      StartHTTPPollers=3
+      CacheSize=256M
+      HistoryCacheSize=64M
+      TrendCacheSize=32M
+      ValueCacheSize=128M
+      Timeout=30
+      TrapperTimeout=300
+      UnreachablePeriod=45
+      UnavailableDelay=60
+      UnreachableDelay=15
+      AlertScriptsPath=/usr/lib/zabbix/alertscripts
+      ExternalScripts=/usr/lib/zabbix/externalscripts
+      SNMPTrapperFile=/var/log/snmptrap/snmptrap.log
+      ZABBIXCONF
+
+    # Configuration Zabbix Agent2
+    - |
+      cat > /target/etc/zabbix/zabbix_agent2.conf << 'AGENTCONF'
+      PidFile=/run/zabbix/zabbix_agent2.pid
+      LogFile=/var/log/zabbix/zabbix_agent2.log
+      LogFileSize=100
+      Server=127.0.0.1
+      ServerActive=127.0.0.1
+      Hostname=cgh-smsg.congo-handling.aero
+      Include=/etc/zabbix/zabbix_agent2.d/*.conf
+      AGENTCONF
+
+    # Créer répertoires SSL
+    - curtin in-target --target=/target -- mkdir -p /etc/ssl/certs /etc/ssl/private
+
+    # Copier certificat wildcard SSL (fullchain)
+    - |
+      cat > /target/etc/ssl/certs/congo-handling.aero-fullchain.pem << 'SSLCERT'
+      -----BEGIN CERTIFICATE-----
+      MIIGnzCCBQegAwIBAgIRAP1f7z0lM/iTT6ZgsMKq04MwDQYJKoZIhvcNAQELBQAw
+      YDELMAkGA1UEBhMCR0IxGDAWBgNVBAoTD1NlY3RpZ28gTGltaXRlZDE3MDUGA1UE
+      AxMuU2VjdGlnbyBQdWJsaWMgU2VydmVyIEF1dGhlbnRpY2F0aW9uIENBIERWIFIz
+      NjAeFw0yNjAxMjIwMDAwMDBaFw0yNjA4MDYyMzU5NTlaMCAxHjAcBgNVBAMMFSou
+      Y29uZ28taGFuZGxpbmcuYWVybzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoC
+      ggEBAML1e8Drypb5ujQOqj7E3KPH44ugsgRfCk3ZQxiBAOKroz/G+I/WwDNIV4xu
+      QC8F3IW1gObsF5zPUMQWzCgg1xJZ7bfpdkhxdOcErIeMEkxLddBvpbrJR054VZ04
+      SJYvQItLUBWZTgZ7y7AtqVDtSUR3FWTR6cJpTM75TwhNbXG3WZm+4JdyOOE2nI/1
+      QnpaWViuvSH9gxI91wU7Hy7ah+mEa6V0sBx33NQ0jAHjB2TCZ6BWuM9NStzaAo/w
+      XBN1qmbumS039h96MlREHL+baYHjLvS+Jpo1VK0WMSFrMIFXnynE+dZv/72ba48r
+      UCsdVXrbkEwRv8sjdTxMRtjhRNkCAwEAAaOCAxIwggMOMB8GA1UdIwQYMBaAFGjA
+      EhYYDq/O9oemMlejRlFdywcnMB0GA1UdDgQWBBQ0EgpU8rAGIiQIST30k/Lr2X2H
+      3zAOBgNVHQ8BAf8EBAMCBaAwDAYDVR0TAQH/BAIwADAdBgNVHSUEFjAUBggrBgEF
+      BQcDAQYIKwYBBQUHAwIwSQYDVR0gBEIwQDA0BgsrBgEEAbIxAQICBzAlMCMGCCsG
+      AQUFBwIBFhdodHRwczovL3NlY3RpZ28uY29tL0NQUzAIBgZngQwBAgEwgYQGCCsG
+      AQUFBwEBBHgwdjBPBggrBgEFBQcwAoZDaHR0cDovL2NydC5zZWN0aWdvLmNvbS9T
+      ZWN0aWdvUHVibGljU2VydmVyQXV0aGVudGljYXRpb25DQURWUjM2LmNydDAjBggr
+      BgEFBQcwAYYXaHR0cDovL29jc3Auc2VjdGlnby5jb20wNQYDVR0RBC4wLIIVKi5j
+      b25nby1oYW5kbGluZy5hZXJvghNjb25nby1oYW5kbGluZy5hZXJvMIIBhAYKKwYB
+      BAHWeQIEAgSCAXQEggFwAW4AdQDXbX0Q0af1d8LH6V/XAL/5gskzWmXh0LMBcxfA
+      yMVpdwAAAZvnBNHqAAAEAwBGMEQCIDK02lfD4Uvt4wswbPmuMIaUO6+GEChs2q3D
+      Dpvf2/DZAiBpfQqXXd4TYaO6lrO2TkWJBgzHagTjrsQ6n2VINuHnPwB2AMijxH/H
+      s625NWsBP2p6Em3jOk5DpcZG+ZetOXWZHc+aAAABm+cE0lAAAAQDAEcwRQIgNhKe
+      wPcaypI9FVfeEWWgM5jGVHbg0V5xVaD+KINyDJACIQDxv5XLB6SlM0pPDs+w1xoO
+      eF+lyAl5CGY7gShpBBbNWgB9AGz+UBlDqF6pFrxS0TPk3Mke8UEcfSWEINFzgJ4Y
+      GOs6AAABm+cE06gACAAABQACNnVeBAMARjBEAiB8m0Vszq25OKHnGEQA+9B6bUCc
+      7TtyDtmvbWNATcZy7gIgfRreUPpg67hxGZpWzo9/KbReYmPPE478wyCn0zMIcmIw
+      DQYJKoZIhvcNAQELBQADggGBAAO39V23YbAjA7uCDmBg1QdKTtPb7wJTT+FKxrTO
+      b/jEUF6BAY/lh/izZraDKVnmTp4XaojEk8XFnS35TUO39jGMACvwApb0QhnRBDts
+      PaoOsM+BU29cBFXfcETmOvwa1MaQIylbolJyviXVmWJKLx/eSv6iufrGFes+Ii65
+      BXgThTOeBH2KZARmERcLih0gl3BfET06XskE6lveEXChMgra8zPpcIjJW/RAOK49
+      qdewnUvUrkZDfxpbTCdKQf+Vydrtx5I+lE1+/ohnD7PGg34x4EmA0uNj7uOYg384
+      WT1zLv3DzxX/vehxZYovXZeoRY51CghzgIapWrchNFrJNIjwmsEnFRnlTJv8YPij
+      1BuYTvCcPPtkRC7Jbp2hK0XPCR+yIyAHmpIdR8hlyk1cJJgxH1cY1phz3Rb70b5+
+      S3sxE4hPAE9CMizdabqlHRRdAC7n0lsJ0ulX8bn18e4WOkDks3Ejtj/YMZBdk29X
+      ML93yR9yu2UFnGg7rnWrR0qsaw==
+      -----END CERTIFICATE-----
+      -----BEGIN CERTIFICATE-----
+      MIIGTDCCBDSgAwIBAgIQOXpmzCdWNi4NqofKbqvjsTANBgkqhkiG9w0BAQwFADBf
+      MQswCQYDVQQGEwJHQjEYMBYGA1UEChMPU2VjdGlnbyBMaW1pdGVkMTYwNAYDVQQD
+      Ey1TZWN0aWdvIFB1YmxpYyBTZXJ2ZXIgQXV0aGVudGljYXRpb24gUm9vdCBSNDYw
+      HhcNMjEwMzIyMDAwMDAwWhcNMzYwMzIxMjM1OTU5WjBgMQswCQYDVQQGEwJHQjEY
+      MBYGA1UEChMPU2VjdGlnbyBMaW1pdGVkMTcwNQYDVQQDEy5TZWN0aWdvIFB1Ymxp
+      YyBTZXJ2ZXIgQXV0aGVudGljYXRpb24gQ0EgRFYgUjM2MIIBojANBgkqhkiG9w0B
+      AQEFAAOCAY8AMIIBigKCAYEAljZf2HIz7+SPUPQCQObZYcrxLTHYdf1ZtMRe7Yeq
+      RPSwygz16qJ9cAWtWNTcuICc++p8Dct7zNGxCpqmEtqifO7NvuB5dEVexXn9RFFH
+      12Hm+NtPRQgXIFjx6MSJcNWuVO3XGE57L1mHlcQYj+g4hny90aFh2SCZCDEVkAja
+      EMMfYPKuCjHuuF+bzHFb/9gV8P9+ekcHENF2nR1efGWSKwnfG5RawlkaQDpRtZTm
+      M64TIsv/r7cyFO4nSjs1jLdXYdz5q3a4L0NoabZfbdxVb+CUEHfB0bpulZQtH1Rv
+      38e/lIdP7OTTIlZh6OYL6NhxP8So0/sht/4J9mqIGxRFc0/pC8suja+wcIUna0HB
+      pXKfXTKpzgis+zmXDL06ASJf5E4A2/m+Hp6b84sfPAwQ766rI65mh50S0Di9E3Pn
+      2WcaJc+PILsBmYpgtmgWTR9eV9otfKRUBfzHUHcVgarub/XluEpRlTtZudU5xbFN
+      xx/DgMrXLUAPaI60fZ6wA+PTAgMBAAGjggGBMIIBfTAfBgNVHSMEGDAWgBRWc1hk
+      lfmSGrASKgRieaFAFYghSTAdBgNVHQ4EFgQUaMASFhgOr872h6YyV6NGUV3LBycw
+      DgYDVR0PAQH/BAQDAgGGMBIGA1UdEwEB/wQIMAYBAf8CAQAwHQYDVR0lBBYwFAYI
+      KwYBBQUHAwEGCCsGAQUFBwMCMBsGA1UdIAQUMBIwBgYEVR0gADAIBgZngQwBAgEw
+      VAYDVR0fBE0wSzBJoEegRYZDaHR0cDovL2NybC5zZWN0aWdvLmNvbS9TZWN0aWdv
+      UHVibGljU2VydmVyQXV0aGVudGljYXRpb25Sb290UjQ2LmNybDCBhAYIKwYBBQUH
+      AQEEeDB2ME8GCCsGAQUFBzAChkNodHRwOi8vY3J0LnNlY3RpZ28uY29tL1NlY3Rp
+      Z29QdWJsaWNTZXJ2ZXJBdXRoZW50aWNhdGlvblJvb3RSNDYucDdjMCMGCCsGAQUF
+      BzABhhdodHRwOi8vb2NzcC5zZWN0aWdvLmNvbTANBgkqhkiG9w0BAQwFAAOCAgEA
+      YtOC9Fy+TqECFw40IospI92kLGgoSZGPOSQXMBqmsGWZUQ7rux7cj1du6d9rD6C8
+      ze1B2eQjkrGkIL/OF1s7vSmgYVafsRoZd/IHUrkoQvX8FZwUsmPu7amgBfaY3g+d
+      q1x0jNGKb6I6Bzdl6LgMD9qxp+3i7GQOnd9J8LFSietY6Z4jUBzVoOoz8iAU84OF
+      h2HhAuiPw1ai0VnY38RTI+8kepGWVfGxfBWzwH9uIjeooIeaosVFvE8cmYUB4TSH
+      5dUyD0jHct2+8ceKEtIoFU/FfHq/mDaVnvcDCZXtIgitdMFQdMZaVehmObyhRdDD
+      4NQCs0gaI9AAgFj4L9QtkARzhQLNyRf87Kln+YU0lgCGr9HLg3rGO8q+Y4ppLsOd
+      unQZ6ZxPNGIfOApbPVf5hCe58EZwiWdHIMn9lPP6+F404y8NNugbQixBber+x536
+      WrZhFZLjEkhp7fFXf9r32rNPfb74X/U90Bdy4lzp3+X1ukh1BuMxA/EEhDoTOS3l
+      7ABvc7BYSQubQ2490OcdkIzUh3ZwDrakMVrbaTxUM2p24N6dB+ns2zptWCva6jzW
+      r8IWKIMxzxLPv5Kt3ePKcUdvkBU/smqujSczTzzSjIoR5QqQA6lN1ZRSnuHIWCvh
+      JEltkYnTAH41QJ6SAWO66GrrUESwN/cgZzL4JLEqz1Y=
+      -----END CERTIFICATE-----
+      -----BEGIN CERTIFICATE-----
+      MIIGlTCCBH2gAwIBAgIRANJ/u8HeNZ5SFq1hSVhgmcQwDQYJKoZIhvcNAQEMBQAw
+      gYgxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpOZXcgSmVyc2V5MRQwEgYDVQQHEwtK
+      ZXJzZXkgQ2l0eTEeMBwGA1UEChMVVGhlIFVTRVJUUlVTVCBOZXR3b3JrMS4wLAYD
+      VQQDEyVVU0VSVHJ1c3QgUlNBIENlcnRpZmljYXRpb24gQXV0aG9yaXR5MB4XDTIx
+      MDMyMjAwMDAwMFoXDTM4MDExODIzNTk1OVowXzELMAkGA1UEBhMCR0IxGDAWBgNV
+      BAoTD1NlY3RpZ28gTGltaXRlZDE2MDQGA1UEAxMtU2VjdGlnbyBQdWJsaWMgU2Vy
+      dmVyIEF1dGhlbnRpY2F0aW9uIFJvb3QgUjQ2MIICIjANBgkqhkiG9w0BAQEFAAOC
+      Ag8AMIICCgKCAgEAk77VNlJ12AEjoBxHQknuY7a3If3EldVIKyZ8FFMQ2nn9K7ct
+      pNQs+uoy3UnCub0PSD17WphUr55dMXRPB/xQId2kz2hPGxJjbSWZTCqZ80gwYfqB
+      fB6nCErcPiscHxhMcao1jK34bug7StnllALWiYQTqm3ITzPMUJY3kjPcX4jnn1TZ
+      SPCYQ9Zm/Z8XOEPFAVEL1+MjDxRdWxTnS77d9MjaAzfR1jmhIVEwg7Bt1zBOlluR
+      8HAkq79FgWRDDb0hOi886Z4NyyC1QifM2m+b7mQwkDnNk2WBITG1I1AzNyLjOO34
+      MTDMRf5i+dFdMnlCh99qzFYZQE3Oqrv5tXZJlPEn+JGlg+UGs2MOgNzgElWApjtm
+      tDmHLcjw0NEU6eQNTQ72XVdyxTscR1ad4tX7gWGMzE2AkDRbt9cUddzYBEifwMEo
+      iLTpHMqnsfFWt3tJTFnlIBWohAIp+jiUaZpJBo/NH3kUFxIMg3reH7GX7vmXeCik
+      yESS6X0mBaZYcpt5E9gRX67FOGI0aLKGMI74kGGeMmz1BzbNokxu7Io27fLmmRVE
+      cMN8vJw5wLTha/eDJSNX2RKA5UnwdQ/vjescm1QotCE8/HwK/+97a3X/ix2gGQWr
+      +vgrgULoOLq7+6r9PeDzyt9Ol5cp7fMYVumllqy9w5CYsuD5otSmR0N8bc8CAwEA
+      AaOCASAwggEcMB8GA1UdIwQYMBaAFFN5v1qqK0rPVIDh2JvAnfKyA2bLMB0GA1Ud
+      DgQWBBRWc1hklfmSGrASKgRieaFAFYghSTAOBgNVHQ8BAf8EBAMCAYYwDwYDVR0T
+      AQH/BAUwAwEB/zAdBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwEQYDVR0g
+      BAowCDAGBgRVHSAAMFAGA1UdHwRJMEcwRaBDoEGGP2h0dHA6Ly9jcmwudXNlcnRy
+      dXN0LmNvbS9VU0VSVHJ1c3RSU0FDZXJ0aWZpY2F0aW9uQXV0aG9yaXR5LmNybDA1
+      BggrBgEFBQcBAQQpMCcwJQYIKwYBBQUHMAGGGWh0dHA6Ly9vY3NwLnVzZXJ0cnVz
+      dC5jb20wDQYJKoZIhvcNAQEMBQADggIBADpvBIlq7bMU0cFDT/9P9+BsgCkRgQs0
+      S6Bf7vJSlWMHwby0VGvxCS0hrbi0K2BINZbEbsVsgpQq04431yyoVn3Hldorgq24
+      RldRDOOipEZDTFB9wC9HYt1thHF00XeG2C8KC1plwoEzKAIhPvefI/C3cT0CfTXJ
+      uFjUbKIgSwjNjw6YHtLgoy/hd5+JLUlLco/gzFX/qWbT7tEquOMYpsNKWZj8TLqP
+      q6zMiG4Na6feEZte6YPXGrMWlTWN341vDedc+yxQqSug79HJUQcOZs7KyDWztmae
+      QxsPE49UV/8XwrfZtZaYyrs4FpD94Z4Q8dzXGL8+qEJjxgcza7W6PROaClubavd1
+      VKPm8+aCW77u7SxpR2TFGL6kPdxsKyFijpcunR5V79sUyROfNdzjrAcFWZXK8sbb
+      9FlnwuVG677JLv+ZVTX5AxLvW5OB4zt5uS+zB62wJ/Wv+jXGAttSAcJec4iFgCWH
+      Rvdi/jJoSzRLa3nEzx6pFIzclSCnh0u1xCeLcUBypSiPga8W+6PkuoyQq8U9qs9E
+      oxG5NvrvlyshwUS9yvcZRGw7Ljlx4jJH/BhIPR8kIBCQj1vna9TziZOrw1Of8hDU
+      bHKFG9Pm8Dp2vbjz/2JH39qvxshPKVllGfq+5klPm7yZRUYTiCMAbqwNdL/nsqF2
+      Rnnyp58XRStJ
+      -----END CERTIFICATE-----
+      -----BEGIN CERTIFICATE-----
+      MIIF3jCCA8agAwIBAgIQAf1tMPyjylGoG7xkDjUDLTANBgkqhkiG9w0BAQwFADCB
+      iDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCk5ldyBKZXJzZXkxFDASBgNVBAcTC0pl
+      cnNleSBDaXR5MR4wHAYDVQQKExVUaGUgVVNFUlRSVVNUIE5ldHdvcmsxLjAsBgNV
+      BAMTJVVTRVJUcnVzdCBSU0EgQ2VydGlmaWNhdGlvbiBBdXRob3JpdHkwHhcNMTAw
+      MjAxMDAwMDAwWhcNMzgwMTE4MjM1OTU5WjCBiDELMAkGA1UEBhMCVVMxEzARBgNV
+      BAgTCk5ldyBKZXJzZXkxFDASBgNVBAcTC0plcnNleSBDaXR5MR4wHAYDVQQKExVU
+      aGUgVVNFUlRSVVNUIE5ldHdvcmsxLjAsBgNVBAMTJVVTRVJUcnVzdCBSU0EgQ2Vy
+      dGlmaWNhdGlvbiBBdXRob3JpdHkwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIK
+      AoICAQCAEmUXNg7D2wiz0KxXDXbtzSfTTK1Qg2HiqiBNCS1kCdzOiZ/MPans9s/B
+      3PHTsdZ7NygRK0faOca8Ohm0X6a9fZ2jY0K2dvKpOyuR+OJv0OwWIJAJPuLodMkY
+      tJHUYmTbf6MG8YgYapAiPLz+E/CHFHv25B+O1ORRxhFnRghRy4YUVD+8M/5+bJz/
+      Fp0YvVGONaanZshyZ9shZrHUm3gDwFA66Mzw3LyeTP6vBZY1H1dat//O+T23LLb2
+      VN3I5xI6Ta5MirdcmrS3ID3KfyI0rn47aGYBROcBTkZTmzNg95S+UzeQc0PzMsNT
+      79uq/nROacdrjGCT3sTHDN/hMq7MkztReJVni+49Vv4M0GkPGw/zJSZrM233bkf6
+      c0Plfg6lZrEpfDKEY1WJxA3Bk1QwGROs0303p+tdOmw1XNtB1xLaqUkL39iAigmT
+      Yo61Zs8liM2EuLE/pDkP2QKe6xJMlXzzawWpXhaDzLhn4ugTncxbgtNMs+1b/97l
+      c6wjOy0AvzVVdAlJ2ElYGn+SNuZRkg7zJn0cTRe8yexDJtC/QV9AqURE9JnnV4ee
+      UB9XVKg+/XRjL7FQZQnmWEIuQxpMtPAlR1n6BB6T1CZGSlCBst6+eLf8ZxXhyVeE
+      Hg9j1uliutZfVS7qXMYoCAQlObgOK6nyTJccBz8NUvXt7y+CDwIDAQABo0IwQDAd
+      BgNVHQ4EFgQUU3m/WqorSs9UgOHYm8Cd8rIDZsswDgYDVR0PAQH/BAQDAgEGMA8G
+      A1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQEMBQADggIBAFzUfA3P9wF9QZllDHPF
+      Up/L+M+ZBn8b2kMVn54CVVeWFPFSPCeHlCjtHzoBN6J2/FNQwISbxmtOuowhT6KO
+      VWKR82kV2LyI48SqC/3vqOlLVSoGIG1VeCkZ7l8wXEskEVX/JJpuXior7gtNn3/3
+      ATiUFJVDBwn7YKnuHKsSjKCaXqeYalltiz8I+8jRRa8YFWSQEg9zKC7F4iRO/Fjs
+      8PRF/iKz6y+O0tlFYQXBl2+odnKPi4w2r78NBc5xjeambx9spnFixdjQg3IM8WcR
+      iQycE0xyNN+81XHfqnHd4blsjDwSXWXavVcStkNr/+XeTWYRUc+ZruwXtuhxkYze
+      Sf7dNXGiFSeUHM9h4ya7b6NnJSFd5t0dCy5oGzuCr+yDZ4XUmFF0sbmZgIn/f3gZ
+      XHlKYC6SQK5MNyosycdiyA5d9zZbyuAlJQG03RoHnHcAP9Dc1ew91Pq7P8yF1m9/
+      qS3fuQL39ZeatTXaw2ewh0qpKJ4jjv9cJ2vhsE/zB+4ALtRZh8tSQZXq9EfX7mRB
+      VXyNWQKV3WKdwrnuWih0hKWbt5DHDAff9Yk2dDLWKMGwsAvgnEzDHNb842m1R0aB
+      L6KCq9NjRHDEjf8tM7qtj3u1cIiuPhnPQCjY/MiQu12ZIvVS5ljFH4gxQ+6IHdfG
+      jjxDah2nGN59PRbxYvnKkKj9
+      -----END CERTIFICATE-----
+      SSLCERT
+
+    # Permissions certificat
+    - curtin in-target --target=/target -- chmod 644 /etc/ssl/certs/congo-handling.aero-fullchain.pem
+
+    # Clé privée SSL wildcard
+    - |
+      cat > /target/etc/ssl/private/congo-handling.aero.key << 'SSLKEY'
+      -----BEGIN PRIVATE KEY-----
+      MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDC9XvA68qW+bo0
+      Dqo+xNyjx+OLoLIEXwpN2UMYgQDiq6M/xviP1sAzSFeMbkAvBdyFtYDm7Becz1DE
+      FswoINcSWe236XZIcXTnBKyHjBJMS3XQb6W6yUdOeFWdOEiWL0CLS1AVmU4Ge8uw
+      LalQ7UlEdxVk0enCaUzO+U8ITW1xt1mZvuCXcjjhNpyP9UJ6WllYrr0h/YMSPdcF
+      Ox8u2ofphGuldLAcd9zUNIwB4wdkwmegVrjPTUrc2gKP8FwTdapm7pktN/YfejJU
+      RBy/m2mB4y70viaaNVStFjEhazCBV58pxPnWb/+9m2uPK1ArHVV625BMEb/LI3U8
+      TEbY4UTZAgMBAAECggEACRGzsLpx8YAAd3d51/L/HedTNdBDN7eBb978I2Gs5t57
+      zksKjmERDnxTsPFYBFf4ytzcouFiCntiaHIfC9GAmmvwhlj9QErMLgr7nk/tHKYj
+      VDo9XWkLliI8PqoQRlxAW7p50+djx81udkL0LhLmZkxGhIAh/ayO/s8o1rFeC/zE
+      q4nuxKGyEXh2gngcitGuT/bQJ6qdf6lEELhXBRyR/xmyOEp3tm1HIIa3JNKbK+Wf
+      l0/EIwqaihpLDSHyGow1gbeAkdfntp0BemwoADrZBDEMbHoPN61M09btdrCLBtbj
+      dyOZKqQOoMy7JFwJqUjf7uSoH8rNr+KLfcYhUSr7mQKBgQDuwWvsYVWZ6hAK/OZQ
+      qSHhFNLyYF5HJMaUfIjW0FlfBE8JatI7RjC8sx6pnpyd1m5fM5N1h1qCkiQF9MKX
+      hPjYzXBJoFRjCNaHO7I0eUD4lF0qq1Nj4ucBiJWozb6xploItTi9Ihtrr3PQSqDD
+      CPqrDKGsRuykd4lpYgbznswb3wKBgQDRCkOlOyrIA2v8iAizqA5VTpF+3LU/p7Sj
+      RRf3L+gu6bZ590m6ApZgMAuq5MePd/str31joEeg4MgHERo9GQOA/leMSdcSdQS7
+      NeDqpkn9dta+zG1q2S/UMcpC/7O9qWYUBI2OFJIM9S9kifhiQMSSYNpqABWzJQGb
+      ap74fCu2RwKBgCw6EC/dZ+n2/bnLVy6h5fC31sunJk+vdEmVOBPyzFtZhPqNmxv3
+      yJdr5sYs534ldpSUDUC8Lfv57kpcKJ/AtggTJjW9SWR/Ap5SZJRr0ak6cnew/OWH
+      5prWHkMCucxWsF7kkvoWE1ZDTgTLjjQSubxtvpUXHkbpDb9DtV3zkIOpAoGBAKar
+      NWYfd6vDtqzBVZbQrqTroOvyU3zuXQM0irgmdUw6QaibNyhc+cK1bAgUotxMAHPb
+      kPEHETU/I50m0LHYKMgHgowzL4ziyiPuAGd2sFWsE+pKmg7wHcdk72xd7dSRpPbe
+      7nJTCmPUdbYGn4jPNSu0l1Cewq50GgTtjNR4RG3vAoGBANk4fPZ6Vu3AzWzgNjvL
+      akBYOZ8IKWYGDbW1HhA5JNRq4e9kWpPHmI0w6TLtrVayPJZK9yf25VXPxwyLtMZe
+      CZDrk3Mw5epx+01/F0EPJw1nkv7iFUE5/FHyQChQfH80mXh56gEcLgOHkm1rD7TL
+      Lqmd4m6IPY8PHHdFDUDJJF4O
+      -----END PRIVATE KEY-----
+      SSLKEY
+
+    # Permissions clé privée (IMPORTANT: sécurité)
+    - curtin in-target --target=/target -- chmod 600 /etc/ssl/private/congo-handling.aero.key
+    - curtin in-target --target=/target -- chown root:root /etc/ssl/private/congo-handling.aero.key
+
+    # ============================================================================
+    # CONFIGURATION MODEM HUAWEI E303/E3372
+    # ============================================================================
+
+    # Règles udev pour modem USB - Auto-détection et permissions
+    - |
+      cat > /target/etc/udev/rules.d/99-huawei-modem.rules << 'UDEVRULES'
+      # Huawei E303 / E3372 USB Modem
+      # Vendor ID 12d1, Product ID variés selon modèle
+
+      # E303 (0x1506 = mass storage, 0x14db = modem mode)
+      SUBSYSTEM=="usb", ATTRS{idVendor}=="12d1", ATTRS{idProduct}=="1506", RUN+="/usr/sbin/usb_modeswitch -v 12d1 -p 1506 -M '55534243123456780000000000000011062000000100000000000000000000'"
+      SUBSYSTEM=="usb", ATTRS{idVendor}=="12d1", ATTRS{idProduct}=="14db", MODE="0666", GROUP="dialout"
+
+      # E3372 (0x157d = mass storage, 0x1506 = modem mode)
+      SUBSYSTEM=="usb", ATTRS{idVendor}=="12d1", ATTRS{idProduct}=="157d", RUN+="/usr/sbin/usb_modeswitch -v 12d1 -p 157d -M '55534243123456780000000000000011062000000100000000000000000000'"
+      SUBSYSTEM=="usb", ATTRS{idVendor}=="12d1", ATTRS{idProduct}=="1506", MODE="0666", GROUP="dialout"
+
+      # Permissions réseau
+      SUBSYSTEM=="net", ATTRS{idVendor}=="12d1", MODE="0666", GROUP="dialout"
+      UDEVRULES
+
+    # Ajouter localadmin au groupe dialout (accès modem USB)
+    - curtin in-target --target=/target -- usermod -a -G dialout localadmin
+
+    # Script de vérification modem
+    - |
+      cat > /target/usr/local/bin/check-modem.sh << 'CHECKMODEM'
+      #!/bin/bash
+      #===============================================
+      # Vérification Modem Huawei E303/E3372
+      #===============================================
+
+      echo "=== Vérification Modem Huawei ==="
+      echo ""
+
+      # 1. Vérifier périphériques USB
+      echo "[1/5] Périphériques USB Huawei détectés:"
+      lsusb | grep -i "12d1:.*Huawei" || echo "  ⚠️  Aucun modem Huawei détecté"
+      echo ""
+
+      # 2. Vérifier interfaces réseau
+      echo "[2/5] Interfaces réseau modem:"
+      ip addr show | grep -E "^[0-9]+: (eth|usb)" | head -5
+      echo ""
+
+      # 3. Ping vers gateway modem (par défaut 192.168.8.1)
+      echo "[3/5] Test connectivité modem (192.168.8.1):"
+      if ping -c 2 -W 2 192.168.8.1 >/dev/null 2>&1; then
+          echo "  ✅ Modem accessible"
+      else
+          echo "  ⚠️  Modem non accessible sur 192.168.8.1"
+      fi
+      echo ""
+
+      # 4. Test API modem /api/webserver/SesTokInfo
+      echo "[4/5] Test API modem:"
+      RESPONSE=$(curl -s -m 5 http://192.168.8.1/api/webserver/SesTokInfo 2>/dev/null)
+      if echo "$RESPONSE" | grep -q "SesInfo"; then
+          echo "  ✅ API modem répond correctement"
+      else
+          echo "  ⚠️  API modem non accessible"
+      fi
+      echo ""
+
+      # 5. État SMS Gateway service
+      echo "[5/5] Service SMS Gateway:"
+      if systemctl is-active --quiet sms-gateway; then
+          echo "  ✅ Service actif"
+      else
+          echo "  ⚠️  Service inactif"
+      fi
+      echo ""
+
+      echo "=== Fin vérification ==="
+      CHECKMODEM
+    - curtin in-target --target=/target -- chmod +x /usr/local/bin/check-modem.sh
+
+    # Script de monitoring modem pour Zabbix
+    - |
+      cat > /target/etc/zabbix/zabbix_agent2.d/modem-check.conf << 'MODEMCHECK'
+      # Monitoring modem Huawei via UserParameter
+
+      # Signal strength (0-100)
+      UserParameter=modem.signal,curl -s http://192.168.8.1/api/monitoring/status 2>/dev/null | grep -oP '(?<=<SignalStrength>)[^<]+' || echo 0
+
+      # Network type (3G/4G/LTE)
+      UserParameter=modem.network,curl -s http://192.168.8.1/api/monitoring/status 2>/dev/null | grep -oP '(?<=<CurrentNetworkType>)[^<]+' || echo "UNKNOWN"
+
+      # Connection status (0=disconnected, 1=connected)
+      UserParameter=modem.connected,ping -c 1 -W 2 192.168.8.1 >/dev/null 2>&1 && echo 1 || echo 0
+
+      # SMS Gateway API health (0=down, 1=up)
+      UserParameter=sms_gateway.health,curl -s http://localhost:4000/api/health 2>/dev/null | grep -q '"status":"healthy"' && echo 1 || echo 0
+
+      # SMS queue pending count
+      UserParameter=sms_gateway.queue_pending,curl -s http://localhost:4000/api/health 2>/dev/null | jq -r '.queue.pending // 0'
+      MODEMCHECK
+
+    # ============================================================================
+    # CONFIGURATION NGINX
+    # ============================================================================
+
+    - |
+      cat > /target/etc/nginx/conf.d/cgh-smsg.conf << 'NGINXCONF'
+      # Upstream pour Phoenix SMS Gateway (port 4000)
+      upstream phoenix_sms {
+          server 127.0.0.1:4000 fail_timeout=0;
+      }
+
+      # Redirection HTTP vers HTTPS
+      server {
+          listen 80;
+          server_name cgh-smsg.congo-handling.aero;
+          return 301 https://$server_name$request_uri;
+      }
+
+      # Serveur HTTPS - Zabbix + SMS Gateway
+      server {
+          listen 443 ssl http2;
+          server_name cgh-smsg.congo-handling.aero;
+
+          # Certificats SSL
+          ssl_certificate /etc/ssl/certs/congo-handling.aero-fullchain.pem;
+          ssl_certificate_key /etc/ssl/private/congo-handling.aero.key;
+
+          # Protocoles et ciphers modernes
+          ssl_protocols TLSv1.2 TLSv1.3;
+          ssl_prefer_server_ciphers on;
+          ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384';
+
+          # Sessions SSL
+          ssl_session_timeout 1d;
+          ssl_session_cache shared:SSL:50m;
+          ssl_session_tickets off;
+
+          # OCSP Stapling
+          ssl_stapling on;
+          ssl_stapling_verify on;
+          resolver 10.2.0.200 192.168.5.200 8.8.8.8 valid=300s;
+          resolver_timeout 5s;
+
+          # En-têtes de sécurité
+          add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+          add_header X-Frame-Options "SAMEORIGIN" always;
+          add_header X-Content-Type-Options "nosniff" always;
+          add_header X-XSS-Protection "1; mode=block" always;
+
+          # =============================================
+          # SMS GATEWAY API (Phoenix/Elixir) - /sms/*
+          # =============================================
+
+          # API SMS - Proxy vers Phoenix (port 4000)
+          location /sms/ {
+              proxy_pass http://phoenix_sms/;
+              proxy_http_version 1.1;
+
+              # Headers proxy
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_set_header X-Forwarded-Port $server_port;
+
+              # WebSocket support (Phoenix LiveDashboard)
+              proxy_set_header Upgrade $http_upgrade;
+              proxy_set_header Connection "upgrade";
+
+              # Timeouts
+              proxy_connect_timeout 60s;
+              proxy_send_timeout 60s;
+              proxy_read_timeout 60s;
+
+              # Buffering
+              proxy_buffering off;
+              proxy_buffer_size 4k;
+          }
+
+          # =============================================
+          # ZABBIX - / (root et tout le reste)
+          # =============================================
+
+          root /usr/share/zabbix;
+          index index.php;
+
+          location / {
+              try_files $uri $uri/ /index.php?$args;
+          }
+
+          location ~ \.php$ {
+              fastcgi_pass unix:/var/run/php/php-fpm.sock;
+              fastcgi_index index.php;
+              fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+              include fastcgi_params;
+              fastcgi_read_timeout 300;
+          }
+
+          location ~ /\.ht {
+              deny all;
+          }
+
+          # Logs
+          access_log /var/log/nginx/cgh-smsg-access.log;
+          error_log /var/log/nginx/cgh-smsg-error.log;
+      }
+      NGINXCONF
+
+    # ============================================================================
+    # SERVICE SYSTEMD SMS GATEWAY
+    # ============================================================================
+
+    # Créer répertoire pour l'application SMS Gateway
+    - curtin in-target --target=/target -- mkdir -p /opt/sms-gateway
+    - curtin in-target --target=/target -- chown localadmin:localadmin /opt/sms-gateway
+
+    # Service systemd pour Phoenix SMS Gateway
+    - |
+      cat > /target/etc/systemd/system/sms-gateway.service << 'SYSTEMD'
+      [Unit]
+      Description=SMS Gateway Phoenix Application
+      Documentation=https://github.com/your-repo/sms-gateway
+      After=network.target postgresql.service
+      Requires=postgresql.service
+
+      [Service]
+      Type=exec
+      User=localadmin
+      Group=localadmin
+      WorkingDirectory=/opt/sms-gateway
+
+      # Variables d'environnement PRODUCTION
+      Environment=MIX_ENV=prod
+      Environment=PORT=4000
+      Environment=PHX_HOST=cgh-smsg.congo-handling.aero
+      Environment=PHX_SERVER=true
+
+      # PostgreSQL connexion
+      Environment=DATABASE_URL=ecto://sms_gateway:SmsGateway2024!@localhost/sms_gateway_prod
+      Environment=POOL_SIZE=10
+
+      # Secret (généré au déploiement)
+      Environment=SECRET_KEY_BASE=CHANGE_ME_GENERATE_WITH_MIX_PHX_GEN_SECRET
+
+      # Erlang/Elixir release
+      Environment=RELEASE_NODE=sms_gateway@127.0.0.1
+      Environment=RELEASE_COOKIE=sms_gateway_cookie_change_me
+
+      # Modem configuration
+      Environment=MODEM_BASE_URL=http://192.168.8.1
+      Environment=MODEM_POLL_INTERVAL=30000
+      Environment=MODEM_HEALTH_CHECK_INTERVAL=60000
+
+      # Oban configuration
+      Environment=OBAN_SMS_SEND_CONCURRENCY=6
+      Environment=OBAN_SMS_SEND_RATE_LIMIT=6
+
+      # Rate limiting
+      Environment=DEFAULT_RATE_LIMIT=100
+
+      # Logs
+      Environment=LOG_LEVEL=info
+
+      # Démarrage de l'application
+      ExecStart=/opt/sms-gateway/bin/sms_gateway start
+      ExecStop=/opt/sms-gateway/bin/sms_gateway stop
+
+      # Redémarrage automatique avec backoff exponentiel
+      Restart=on-failure
+      RestartSec=5s
+
+      # Limites
+      LimitNOFILE=65536
+      LimitNPROC=4096
+
+      # Security hardening
+      NoNewPrivileges=true
+      PrivateTmp=true
+
+      [Install]
+      WantedBy=multi-user.target
+      SYSTEMD
+
+    # ============================================================================
+    # SCRIPTS DE DÉPLOIEMENT
+    # ============================================================================
+
+    - |
+      cat > /target/opt/sms-gateway/deploy.sh << 'DEPLOYSCRIPT'
+      #!/bin/bash
+      #===============================================
+      # Déploiement SMS Gateway Phoenix avec Ash
+      #===============================================
+
+      set -euo pipefail
+
+      APP_DIR="/opt/sms-gateway"
+      DB_NAME="sms_gateway_prod"
+      DB_USER="sms_gateway"
+      DB_PASS="SmsGateway2024!"
+
+      echo "=== Déploiement SMS Gateway ==="
+      echo ""
+
+      # 1. Créer la base de données PostgreSQL
+      echo "[1/6] Création de la base de données..."
+      sudo -u postgres psql -c "CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASS}';" 2>/dev/null || echo "  User existe déjà"
+      sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};" 2>/dev/null || echo "  Database existe déjà"
+      sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};"
+      echo "  ✅ Base de données configurée"
+      echo ""
+
+      # 2. Générer SECRET_KEY_BASE et RELEASE_COOKIE si nécessaire
+      if grep -q "CHANGE_ME" /etc/systemd/system/sms-gateway.service; then
+          echo "[2/6] Génération des secrets..."
+          SECRET=$(openssl rand -hex 64)
+          COOKIE=$(openssl rand -hex 32)
+          sudo sed -i "s/CHANGE_ME_GENERATE_WITH_MIX_PHX_GEN_SECRET/${SECRET}/" /etc/systemd/system/sms-gateway.service
+          sudo sed -i "s/sms_gateway_cookie_change_me/${COOKIE}/" /etc/systemd/system/sms-gateway.service
+          sudo systemctl daemon-reload
+          echo "  ✅ Secrets générés"
+      else
+          echo "[2/6] Secrets déjà configurés"
+      fi
+      echo ""
+
+      # 3. Vérifier le modem
+      echo "[3/6] Vérification du modem..."
+      if ping -c 2 -W 2 192.168.8.1 >/dev/null 2>&1; then
+          echo "  ✅ Modem accessible sur 192.168.8.1"
+      else
+          echo "  ⚠️  Modem non accessible - vérifier la connexion USB"
+      fi
+      echo ""
+
+      # 4. Migrations Ecto + Ash (si release présente)
+      if [ -f "${APP_DIR}/bin/sms_gateway" ]; then
+          echo "[4/6] Exécution des migrations..."
+          cd "${APP_DIR}"
+
+          # Migrations Ecto standard
+          ${APP_DIR}/bin/sms_gateway eval "SmsGateway.Release.migrate()" || echo "  Migrations Ecto terminées"
+
+          # Migrations Ash (si présentes)
+          ${APP_DIR}/bin/sms_gateway rpc "AshPostgres.MigrationGenerator.generate(SmsGateway.Sms.Registry, drop_columns: true)" || true
+
+          echo "  ✅ Migrations exécutées"
+      else
+          echo "[4/6] ⚠️  Application non déployée - migrations ignorées"
+          echo "      Copier la release dans ${APP_DIR} d'abord"
+      fi
+      echo ""
+
+      # 5. Créer API Key initiale (admin)
+      if [ -f "${APP_DIR}/bin/sms_gateway" ]; then
+          echo "[5/6] Création API Key admin..."
+          ${APP_DIR}/bin/sms_gateway eval "SmsGateway.Seeds.create_admin_api_key()" 2>/dev/null || echo "  API Key admin existe déjà"
+      else
+          echo "[5/6] API Key - à créer après déploiement"
+      fi
+      echo ""
+
+      # 6. Démarrer le service
+      echo "[6/6] Démarrage du service..."
+      sudo systemctl enable sms-gateway
+      sudo systemctl restart sms-gateway || echo "  Service non démarré (application non présente)"
+      sleep 3
+
+      if systemctl is-active --quiet sms-gateway; then
+          echo "  ✅ SMS Gateway démarré avec succès"
+          echo ""
+          echo "=== Service actif ==="
+          echo "  URL API: https://cgh-smsg.congo-handling.aero/sms/api/v1/messages"
+          echo "  Health:  https://cgh-smsg.congo-handling.aero/sms/api/health"
+          echo "  Dashboard: https://cgh-smsg.congo-handling.aero/sms/dashboard"
+          echo ""
+          echo "  Logs: sudo journalctl -u sms-gateway -f"
+          echo "  Status: sudo systemctl status sms-gateway"
+      else
+          echo "  ⚠️  Service non actif"
+          echo ""
+          echo "=== Prochaines étapes ==="
+          echo "  1. Compiler la release: MIX_ENV=prod mix release"
+          echo "  2. Copier dans ${APP_DIR}"
+          echo "  3. Relancer: sudo systemctl start sms-gateway"
+      fi
+      echo ""
+      DEPLOYSCRIPT
+    - curtin in-target --target=/target -- chmod +x /opt/sms-gateway/deploy.sh
+
+    # ============================================================================
+    # SCRIPTS ZABBIX ALERTES SMS
+    # ============================================================================
+
+    - curtin in-target --target=/target -- mkdir -p /usr/lib/zabbix/alertscripts
+    - curtin in-target --target=/target -- mkdir -p /var/log/zabbix
+    - |
+      cat > /target/usr/lib/zabbix/alertscripts/sms_api.sh << 'SMSSCRIPT'
+      #!/bin/bash
+      #===============================================
+      # Zabbix SMS Alert via SMS Gateway API
+      #===============================================
+
+      # === CONFIGURATION API ===
+      API_URL="https://cgh-smsg.congo-handling.aero/sms/api/v1/messages"
+      API_KEY="${ZABBIX_SMS_API_KEY:-CHANGE_ME_API_KEY}"
+
+      # === PARAMETRES ZABBIX ===
+      TO="$1"
+      SUBJECT="$2"
+      MESSAGE="$3"
+
+      # === LOGGING ===
+      LOG_DIR="/var/log/zabbix"
+      LOG_FILE="${LOG_DIR}/sms_alerts.log"
+      mkdir -p "$LOG_DIR"
+
+      log() {
+          local level="$1"
+          local msg="$2"
+          echo "$(date '+%Y-%m-%d %H:%M:%S') | ${level} | To: ${TO} | ${msg}" >> "$LOG_FILE"
+      }
+
+      # Validation paramètres
+      if [[ -z "$TO" || -z "$SUBJECT" ]]; then
+          log "ERROR" "Paramètres manquants"
+          exit 1
+      fi
+
+      # Préparer SMS (160 chars max)
+      SMS_TEXT="[Zabbix] ${SUBJECT}: ${MESSAGE}"
+      SMS_TEXT="${SMS_TEXT:0:160}"
+      PHONE=$(echo "$TO" | tr -d ' -')
+
+      # Payload JSON
+      PAYLOAD=$(jq -n \
+          --arg phone "$PHONE" \
+          --arg content "$SMS_TEXT" \
+          '{
+              "phone": $phone,
+              "content": $content
+          }')
+
+      # Envoi via API
+      RESPONSE=$(curl -s -w "\n%{http_code}" \
+          -X POST "$API_URL" \
+          -H "X-API-Key: ${API_KEY}" \
+          -H "Content-Type: application/json" \
+          -H "Accept: application/json" \
+          --connect-timeout 10 \
+          --max-time 30 \
+          -d "$PAYLOAD" 2>&1)
+
+      HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+      BODY=$(echo "$RESPONSE" | sed '$d')
+
+      if [[ "$HTTP_CODE" == "201" ]]; then
+          MESSAGE_ID=$(echo "$BODY" | jq -r '.id // "unknown"')
+          log "SUCCESS" "HTTP ${HTTP_CODE} | Message ID: ${MESSAGE_ID}"
+          exit 0
+      else
+          log "FAILED" "HTTP ${HTTP_CODE} | Response: ${BODY}"
+          exit 1
+      fi
+      SMSSCRIPT
+
+    # Permissions scripts
+    - curtin in-target --target=/target -- chmod +x /usr/lib/zabbix/alertscripts/sms_api.sh
+    - curtin in-target --target=/target -- chown -R zabbix:zabbix /usr/lib/zabbix/alertscripts
+    - curtin in-target --target=/target -- chown -R zabbix:zabbix /var/log/zabbix
+
+    # Logrotate pour SMS
+    - |
+      cat > /target/etc/logrotate.d/zabbix-sms << 'LOGROTATE'
+      /var/log/zabbix/sms_alerts.log {
+          weekly
+          rotate 12
+          compress
+          missingok
+          notifempty
+          create 0644 zabbix zabbix
+      }
+      LOGROTATE
+
+    # ============================================================================
+    # FIREWALL UFW
+    # ============================================================================
+
+    - curtin in-target --target=/target -- ufw default deny incoming
+    - curtin in-target --target=/target -- ufw default allow outgoing
+    - curtin in-target --target=/target -- ufw allow ssh
+    - curtin in-target --target=/target -- ufw allow 80/tcp comment 'HTTP'
+    - curtin in-target --target=/target -- ufw allow 443/tcp comment 'HTTPS'
+    - curtin in-target --target=/target -- ufw allow 10050/tcp comment 'Zabbix Agent'
+    - curtin in-target --target=/target -- ufw allow 10051/tcp comment 'Zabbix Server'
+    - curtin in-target --target=/target -- ufw --force enable
+
+    # ============================================================================
+    # ACTIVATION SERVICES
+    # ============================================================================
+
+    - curtin in-target --target=/target -- systemctl enable nginx
+    - curtin in-target --target=/target -- systemctl enable postgresql
+    - curtin in-target --target=/target -- systemctl enable zabbix-server
+    - curtin in-target --target=/target -- systemctl enable zabbix-agent2
+    - curtin in-target --target=/target -- systemctl enable php8.3-fpm
+    # sms-gateway sera activé par deploy.sh
+
+  # Redémarrage automatique après installation
+  shutdown: reboot
