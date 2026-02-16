@@ -5,8 +5,23 @@ defmodule SmsGatewayWeb.Router do
     plug :accepts, ["json"]
   end
 
+  pipeline :api_authenticated do
+    plug :accepts, ["json"]
+    plug SmsGatewayWeb.Plugs.ApiAuth
+  end
+
   scope "/api", SmsGatewayWeb do
     pipe_through :api
+
+    # Public health check endpoint
+    get "/health", HealthController, :show
+  end
+
+  scope "/api/v1", SmsGatewayWeb.Api.V1 do
+    pipe_through :api_authenticated
+
+    # SMS Messages API
+    resources "/messages", MessageController, only: [:create, :index, :show]
   end
 
   # Enable Swoosh mailbox preview in development
