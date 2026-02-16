@@ -26,6 +26,7 @@ defmodule SmsGatewayWeb do
       # Import common connection and controller functions to use in pipelines
       import Plug.Conn
       import Phoenix.Controller
+      import Phoenix.LiveView.Router
     end
   end
 
@@ -44,6 +45,35 @@ defmodule SmsGatewayWeb do
       import Plug.Conn
 
       unquote(verified_routes())
+    end
+  end
+
+  def live_view do
+    quote do
+      use Phoenix.LiveView,
+        layout: {SmsGatewayWeb.Layouts, :app}
+
+      unquote(html_helpers())
+    end
+  end
+
+  def live_component do
+    quote do
+      use Phoenix.LiveComponent
+
+      unquote(html_helpers())
+    end
+  end
+
+  defp html_helpers do
+    quote do
+      import Phoenix.HTML
+      import Phoenix.HTML.Form
+      use Gettext, backend: SmsGatewayWeb.Gettext
+
+      unquote(verified_routes())
+
+      alias Phoenix.LiveView.JS
     end
   end
 

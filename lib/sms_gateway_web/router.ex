@@ -19,6 +19,14 @@ defmodule SmsGatewayWeb.Router do
     plug :put_secure_browser_headers
   end
 
+  pipeline :admin do
+    plug :accepts, ["html"]
+    plug :fetch_session
+    plug :protect_from_forgery
+    plug :put_secure_browser_headers
+    plug SmsGatewayWeb.Plugs.AdminAuth
+  end
+
   scope "/api", SmsGatewayWeb do
     pipe_through :api
 
@@ -41,6 +49,13 @@ defmodule SmsGatewayWeb.Router do
     live_dashboard "/dashboard",
       metrics: SmsGatewayWeb.Telemetry,
       ecto_repos: [SmsGateway.Repo]
+  end
+
+  # Admin interface (protected with Basic Auth)
+  scope "/admin", SmsGatewayWeb.Admin do
+    pipe_through :admin
+
+    live "/api-keys", ApiKeysLive, :index
   end
 
   # Enable Swoosh mailbox preview in development
