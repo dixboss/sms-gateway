@@ -113,7 +113,11 @@ defmodule SmsGateway.Sms.Message do
       end)
 
       after_action(fn _changeset, message, _context ->
-        # TODO: Create Oban job to send SMS
+        # Queue SMS for sending via Oban
+        %{message_id: message.id}
+        |> SmsGateway.Workers.SendSms.new()
+        |> Oban.insert()
+
         {:ok, message}
       end)
     end

@@ -49,6 +49,14 @@ config :sms_gateway, Oban,
     # Status update queue: max 3 concurrent jobs
     sms_status: [limit: 3]
   ],
+  plugins: [
+    # Cron jobs
+    {Oban.Plugins.Cron,
+     crontab: [
+       # Update delivery status every 5 minutes
+       {"*/5 * * * *", SmsGateway.Workers.UpdateStatus}
+     ]}
+  ],
   repo: SmsGateway.Repo
 
 # Import environment specific config. This must remain at the bottom
