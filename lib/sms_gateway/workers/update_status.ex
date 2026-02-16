@@ -130,6 +130,13 @@ defmodule SmsGateway.Workers.UpdateStatus do
       {:ok, _} ->
         Logger.info("Message #{message.id} marked as delivered")
 
+        # Emit telemetry event for delivery confirmation
+        :telemetry.execute(
+          [:sms_gateway, :sms, :delivered],
+          %{count: 1},
+          %{phone: message.phone_number}
+        )
+
       {:error, reason} ->
         Logger.error("Failed to mark message as delivered: #{inspect(reason)}")
     end

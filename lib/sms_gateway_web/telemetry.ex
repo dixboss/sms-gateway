@@ -79,15 +79,81 @@ defmodule SmsGatewayWeb.Telemetry do
       summary("vm.memory.total", unit: {:byte, :kilobyte}),
       summary("vm.total_run_queue_lengths.total"),
       summary("vm.total_run_queue_lengths.cpu"),
-      summary("vm.total_run_queue_lengths.io")
+      summary("vm.total_run_queue_lengths.io"),
+
+      # SMS Gateway Metrics
+      counter("sms_gateway.sms.sent.count",
+        description: "Total number of SMS successfully sent"
+      ),
+      counter("sms_gateway.sms.failed.count",
+        description: "Total number of SMS that failed to send"
+      ),
+      counter("sms_gateway.sms.delivered.count",
+        description: "Total number of SMS confirmed delivered"
+      ),
+      counter("sms_gateway.sms.received.count",
+        description: "Total number of SMS received"
+      ),
+      last_value("sms_gateway.modem.signal_strength",
+        description: "Current modem signal strength (0-100)"
+      ),
+      counter("sms_gateway.modem.error.count",
+        description: "Total modem errors"
+      ),
+      last_value("sms_gateway.queue.pending",
+        description: "Number of pending SMS in queue"
+      ),
+      last_value("sms_gateway.queue.executing",
+        description: "Number of SMS currently being sent"
+      ),
+
+      # Oban Metrics
+      summary("oban.job.start.system_time",
+        unit: {:native, :millisecond},
+        tags: [:worker]
+      ),
+      summary("oban.job.stop.duration",
+        unit: {:native, :millisecond},
+        tags: [:worker]
+      ),
+      summary("oban.job.exception.duration",
+        unit: {:native, :millisecond},
+        tags: [:worker]
+      ),
+      counter("oban.job.complete.count",
+        tags: [:worker, :state]
+      )
     ]
   end
 
   defp periodic_measurements do
     [
-      # A module, function and arguments to be invoked periodically.
-      # This function must call :telemetry.execute/3 and a metric must be added above.
-      # {SmsGatewayWeb, :count_users, []}
+      # Periodic measurements for queue status
+      {__MODULE__, :measure_queue_status, []}
     ]
+  end
+
+  @doc """
+  Periodically measure Oban queue status and emit telemetry events.
+  """
+  def measure_queue_status do
+    try do
+      case Oban.check_queue(queue: :sms_send) do
+        {:ok, stats} ->
+          pending = stats.available + stats.scheduled
+          executing = stats.executing
+
+          :telemetry.execute(
+            [:sms_gateway, :queue, :status],
+            %{pending: pending, executing: executing},
+            %{queue: :sms_send}
+          )
+
+        _ ->
+          :ok
+      end
+    rescue
+      _ -> :ok
+    end
   end
 end

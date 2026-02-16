@@ -122,6 +122,13 @@ defmodule SmsGateway.Modem.Poller do
       {:ok, _message} ->
         Logger.info("Created incoming message from #{msg.phone}")
 
+        # Emit telemetry event for received SMS
+        :telemetry.execute(
+          [:sms_gateway, :sms, :received],
+          %{count: 1},
+          %{phone: msg.phone}
+        )
+
       {:error, reason} ->
         Logger.error("Failed to create message: #{inspect(reason)}")
     end

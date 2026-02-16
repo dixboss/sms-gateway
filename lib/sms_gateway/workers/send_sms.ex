@@ -97,6 +97,13 @@ defmodule SmsGateway.Workers.SendSms do
            action: :mark_sent
          ) do
       {:ok, _updated} ->
+        # Emit telemetry event for successful send
+        :telemetry.execute(
+          [:sms_gateway, :sms, :sent],
+          %{count: 1},
+          %{phone: message.phone_number}
+        )
+
         :ok
 
       {:error, reason} ->
@@ -113,6 +120,13 @@ defmodule SmsGateway.Workers.SendSms do
         case Ash.update(message, %{error_message: error_message}, action: :mark_failed) do
           {:ok, _} ->
             Logger.info("Marked message as failed: #{message_id}")
+
+            # Emit telemetry event for failed send
+            :telemetry.execute(
+              [:sms_gateway, :sms, :failed],
+              %{count: 1},
+              %{phone: message.phone_number, reason: error_message}
+            )
 
           {:error, err} ->
             Logger.error("Failed to mark message as failed: #{inspect(err)}")
