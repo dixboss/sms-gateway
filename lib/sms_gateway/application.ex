@@ -14,8 +14,9 @@ defmodule SmsGateway.Application do
       {Phoenix.PubSub, name: SmsGateway.PubSub},
       # Oban job queue processor
       {Oban, Application.fetch_env!(:sms_gateway, Oban)},
-      # Start a worker by calling: SmsGateway.Worker.start_link(arg)
-      # {SmsGateway.Worker, arg},
+      # Modem integration - polling and health monitoring
+      {SmsGateway.Modem.Poller, [poll_interval: 30_000]},
+      {SmsGateway.Modem.StatusMonitor, [health_check_interval: 60_000]},
       # Start to serve requests, typically the last entry
       SmsGatewayWeb.Endpoint
     ]
