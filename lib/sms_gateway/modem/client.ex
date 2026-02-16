@@ -7,7 +7,7 @@ defmodule SmsGateway.Modem.Client do
   - List incoming SMS messages
   - Check message delivery status
   - Monitor modem health
-  - Manage session tokens for authentication
+  - Manage session tokens and cookies for authentication
 
   Circuit breaker protects against repeated calls to a failing modem:
   - :closed (normal operation)
@@ -15,9 +15,10 @@ defmodule SmsGateway.Modem.Client do
   - :half_open (testing if modem is back online)
 
   Session Token Management:
-  - Tokens are fetched from /api/webserver/token before each request
-  - Tokens are cached in ETS with TTL (5 minutes)
-  - All requests include __RequestVerificationToken header
+  - Session info (SessionID + TokInfo) is fetched from /api/webserver/SesTokInfo
+  - Both values are cached in ETS with TTL (5 minutes)
+  - All requests include Cookie (SessionID) and __RequestVerificationToken (TokInfo) headers
+  - Host header is included for broader modem compatibility (E3372, E3372h, E3131, E303)
   """
 
   require Logger
@@ -118,12 +119,12 @@ defmodule SmsGateway.Modem.Client do
   end
 
   @doc """
-  Clear cached session token (for testing or when token expires).
+  Clear cached session info (for testing or when session expires).
   """
   def clear_token_cache do
     ensure_token_cache_table()
-    :ets.delete(@token_cache_key, :token)
-    Logger.debug("Session token cache cleared")
+    :ets.delete(@token_cache_key, :session)
+    Logger.debug("Session info cache cleared")
   end
 
   # ============================================================================
@@ -133,12 +134,12 @@ defmodule SmsGateway.Modem.Client do
   defp get_session_token do
     ensure_token_cache_table()
 
-    case :ets.lookup(@token_cache_key, :token) do
-      [{:token, token, expires_at}] ->
+    case :ets.lookup(@token_cache_key, :session) do
+      [{:session, {session_id, token}, expires_at}] ->
         if System.monotonic_time(:millisecond) < expires_at do
-          {:ok, token}
+          {:ok, {session_id, token}}
         else
-          Logger.debug("Session token expired, fetching new one")
+          Logger.debug("Session expired, fetching new one")
           fetch_new_token()
         end
 
@@ -149,38 +150,47 @@ defmodule SmsGateway.Modem.Client do
 
   defp fetch_new_token do
     base_url = config(:modem_base_url, "http://192.168.8.1")
-    url = "#{base_url}/api/webserver/token"
+    url = "#{base_url}/api/webserver/SesTokInfo"
 
-    case HTTPoison.get(url, [], timeout: @timeout) do
+    # Extract host from base_url for Host header
+    host = URI.parse(base_url).host || "192.168.8.1"
+    headers = [{"Host", host}]
+
+    case HTTPoison.get(url, headers, timeout: @timeout) do
       {:ok, %{status_code: 200, body: body}} ->
-        case parse_token_response(body) do
-          {:ok, token} ->
-            cache_token(token)
-            {:ok, token}
+        case parse_session_response(body) do
+          {:ok, {session_id, token}} ->
+            cache_session(session_id, token)
+            {:ok, {session_id, token}}
 
           {:error, reason} ->
-            Logger.error("Failed to parse token: #{inspect(reason)}")
-            {:error, :token_parse_failed}
+            Logger.error("Failed to parse session info: #{inspect(reason)}")
+            {:error, :session_parse_failed}
         end
 
       {:ok, %{status_code: status}} ->
-        Logger.error("Token request failed with status: #{status}")
+        Logger.error("Session request failed with status: #{status}")
         {:error, {:http_error, status}}
 
       {:error, reason} ->
-        Logger.error("Token request failed: #{inspect(reason)}")
+        Logger.error("Session request failed: #{inspect(reason)}")
         {:error, reason}
     end
   end
 
-  defp parse_token_response(body) do
+  defp parse_session_response(body) do
     try do
-      token = xpath(body, ~x"//response/token/text()"s)
+      session_id = xpath(body, ~x"//response/SesInfo/text()"s)
+      token = xpath(body, ~x"//response/TokInfo/text()"s)
 
-      if token && token != "" do
-        {:ok, token}
+      if session_id && session_id != "" && token && token != "" do
+        {:ok, {session_id, token}}
       else
-        {:error, :token_not_found}
+        Logger.error(
+          "Missing session info - SesInfo: #{inspect(session_id)}, TokInfo: #{inspect(token)}"
+        )
+
+        {:error, :session_info_not_found}
       end
     rescue
       e ->
@@ -189,11 +199,14 @@ defmodule SmsGateway.Modem.Client do
     end
   end
 
-  defp cache_token(token) do
+  defp cache_session(session_id, token) do
     ensure_token_cache_table()
     expires_at = System.monotonic_time(:millisecond) + @token_ttl
-    :ets.insert(@token_cache_key, {:token, token, expires_at})
-    Logger.debug("Session token cached until #{expires_at}")
+    :ets.insert(@token_cache_key, {:session, {session_id, token}, expires_at})
+
+    Logger.debug(
+      "Session info cached until #{expires_at} - SessionID: #{String.slice(session_id, 0..10)}..., Token: #{String.slice(token, 0..10)}..."
+    )
   end
 
   defp ensure_token_cache_table do
@@ -210,9 +223,9 @@ defmodule SmsGateway.Modem.Client do
     base_url = config(:modem_base_url, "http://192.168.8.1")
     url = "#{base_url}/api/sms/send-sms"
 
-    with {:ok, token} <- get_session_token(),
+    with {:ok, {session_id, token}} <- get_session_token(),
          {:ok, xml_body} <- build_sms_xml(phone_number, content),
-         {:ok, response} <- send_authenticated_request(url, xml_body, token),
+         {:ok, response} <- send_authenticated_request(url, xml_body, session_id, token),
          {:ok, message_id} <- parse_send_sms_response(response.body) do
       {:ok, message_id}
     else
@@ -242,10 +255,15 @@ defmodule SmsGateway.Modem.Client do
     {:ok, xml}
   end
 
-  defp send_authenticated_request(url, body, token) do
+  defp send_authenticated_request(url, body, session_id, token) do
+    base_url = config(:modem_base_url, "http://192.168.8.1")
+    host = URI.parse(base_url).host || "192.168.8.1"
+
     headers = [
       {"Content-Type", "application/xml"},
-      {"__RequestVerificationToken", token}
+      {"Cookie", session_id},
+      {"__RequestVerificationToken", token},
+      {"Host", host}
     ]
 
     HTTPoison.post(url, body, headers, timeout: @timeout)
@@ -255,8 +273,8 @@ defmodule SmsGateway.Modem.Client do
     base_url = config(:modem_base_url, "http://192.168.8.1")
     url = "#{base_url}/api/sms/sms-list?page=1&count=20&box_type=#{box_type}"
 
-    with {:ok, token} <- get_session_token(),
-         {:ok, response} <- send_authenticated_get(url, token),
+    with {:ok, {session_id, token}} <- get_session_token(),
+         {:ok, response} <- send_authenticated_get(url, session_id, token),
          {:ok, messages} <- parse_list_sms_response(response.body) do
       {:ok, messages}
     else
@@ -264,9 +282,14 @@ defmodule SmsGateway.Modem.Client do
     end
   end
 
-  defp send_authenticated_get(url, token) do
+  defp send_authenticated_get(url, session_id, token) do
+    base_url = config(:modem_base_url, "http://192.168.8.1")
+    host = URI.parse(base_url).host || "192.168.8.1"
+
     headers = [
-      {"__RequestVerificationToken", token}
+      {"Cookie", session_id},
+      {"__RequestVerificationToken", token},
+      {"Host", host}
     ]
 
     HTTPoison.get(url, headers, timeout: @timeout)
@@ -276,8 +299,8 @@ defmodule SmsGateway.Modem.Client do
     base_url = config(:modem_base_url, "http://192.168.8.1")
     url = "#{base_url}/api/sms/send-status?message_id=#{modem_message_id}"
 
-    with {:ok, token} <- get_session_token(),
-         {:ok, response} <- send_authenticated_get(url, token),
+    with {:ok, {session_id, token}} <- get_session_token(),
+         {:ok, response} <- send_authenticated_get(url, session_id, token),
          {:ok, status} <- parse_get_status_response(response.body) do
       {:ok, status}
     else
@@ -289,8 +312,8 @@ defmodule SmsGateway.Modem.Client do
     base_url = config(:modem_base_url, "http://192.168.8.1")
     url = "#{base_url}/api/monitoring/status"
 
-    with {:ok, token} <- get_session_token(),
-         {:ok, response} <- send_authenticated_get(url, token),
+    with {:ok, {session_id, token}} <- get_session_token(),
+         {:ok, response} <- send_authenticated_get(url, session_id, token),
          {:ok, health_info} <- parse_health_check_response(response.body) do
       {:ok, health_info}
     else

@@ -35,3 +35,9 @@ config :phoenix, :plug_init_mode, :runtime
 # Sort query params output of verified routes for robust url comparisons
 config :phoenix,
   sort_verified_routes_query_params: true
+
+# Configure Oban for testing - disable queues and plugins
+config :sms_gateway, Oban,
+  testing: :manual,
+  queues: false,
+  plugins: false
