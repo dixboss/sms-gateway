@@ -167,6 +167,10 @@ OBAN_SMS_SEND_RATE_LIMIT=6       # Max 6 SMS/minute (limite modem)
 # Rate limiting
 DEFAULT_RATE_LIMIT=100           # SMS/heure par API key
 
+# Admin Interface (Basic Auth)
+ADMIN_USERNAME=admin             # Username pour /admin (défaut: admin)
+ADMIN_PASSWORD=<générer un mot de passe fort>  # REQUIS en production
+
 # Logs
 LOG_LEVEL=info
 ```
@@ -175,7 +179,39 @@ LOG_LEVEL=info
 
 ### Créer une API Key
 
-**Via IEx console** (méthode actuelle):
+**Via l'interface web d'administration**:
+
+1. Démarrer l'application:
+   ```bash
+   mix phx.server
+   ```
+
+2. Accéder à l'interface admin:
+   ```
+   http://localhost:4000/admin/api-keys
+   ```
+
+3. S'authentifier avec les credentials (configurés via variables d'environnement):
+   - Username: `admin` (ou `ADMIN_USERNAME`)
+   - Password: `admin` en dev (ou `ADMIN_PASSWORD` en production)
+
+4. Cliquer sur **"➕ Create New API Key"**
+
+5. Remplir le formulaire:
+   - **Name**: Nom descriptif (ex: "Application Mobile", "Zabbix Alerts")
+   - **Rate Limit**: Nombre de SMS/heure autorisés (ex: 100)
+
+6. **Important**: Sauvegarder la clé générée (`sk_live_...`) - elle ne sera affichée qu'une seule fois !
+
+**Fonctionnalités de l'interface admin**:
+- 📋 Liste de toutes les API Keys avec statuts et métriques
+- ➕ Création de nouvelles clés avec génération sécurisée
+- ⏸️ Activation/désactivation des clés en temps réel
+- 🗑️ Suppression avec confirmation
+- 📊 Métriques: dernier usage, rate limit, date de création
+- 🔐 Protection par HTTP Basic Authentication
+
+**Alternative via IEx** (si besoin):
 ```elixir
 # Console IEx
 iex -S mix
@@ -186,11 +222,9 @@ alias SmsGateway.Sms.ApiKey
   rate_limit: 100  # SMS/heure
 })
 
-# Sauvegarder la clé (affichée une seule fois!)
-# sk_live_abc123...
+# Note: La clé raw n'est pas accessible via IEx
+# Utiliser l'interface web pour voir la clé complète
 ```
-
-> ⚠️ **Note**: Une interface web d'administration pour la gestion des API Keys est prévue dans la roadmap.
 
 ### Envoyer un SMS via API
 
@@ -261,12 +295,29 @@ curl https://sms-gateway.example.com/api/health
 
 ## 📊 Monitoring
 
+### Interface Admin
+
+Accéder à l'interface d'administration des API Keys:
+```
+https://sms-gateway.example.com/admin/api-keys
+```
+
+**Authentification**: HTTP Basic Auth (ADMIN_USERNAME/ADMIN_PASSWORD)
+
+**Fonctionnalités**:
+- Gestion complète des API Keys (CRUD)
+- Métriques en temps réel par clé
+- Activation/désactivation instantanée
+- Monitoring d'utilisation
+
 ### LiveDashboard
 
 Accéder au dashboard en temps réel:
 ```
 https://sms-gateway.example.com/dashboard
 ```
+
+> ⚠️ **Production**: Protéger cette route avec authentification appropriée
 
 **Métriques disponibles**:
 - SMS envoyés/reçus/échoués
@@ -280,7 +331,7 @@ Ce projet est sous licence MIT. Voir [LICENSE](LICENSE) pour plus de détails.
 
 ## 🗺️ Roadmap
 
-- [ ] **Interface web d'administration** (gestion API Keys)
+- [x] **Interface web d'administration** (gestion API Keys) ✅
 - [ ] Support multi-modems (load balancing)
 - [ ] Webhooks pour notifications temps réel
 - [ ] SMS longs (> 160 caractères, automatic split)
