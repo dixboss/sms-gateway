@@ -235,27 +235,14 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
   end
 
   defp create_api_key(params) do
-    # Generate random key
-    raw_key =
-      ("sk_live_" <> :crypto.strong_rand_bytes(32)) |> Base.encode64() |> binary_part(0, 32)
-
-    # Hash the key
-    key_hash = Bcrypt.hash_pwd_salt(raw_key)
-
-    # Get prefix (first 12 chars for display)
-    key_prefix = String.slice(raw_key, 0, 12)
-
+    # Parse rate_limit as integer
     params =
       params
-      |> Map.put("key_hash", key_hash)
-      |> Map.put("key_prefix", key_prefix)
       |> Map.update("rate_limit", 100, &parse_integer/1)
 
-    case Ash.create(ApiKey, params) do
+    # Use the create_key action which generates key_hash and key_prefix internally
+    case Ash.create(ApiKey, params, action: :create_key) do
       {:ok, api_key} ->
-        # Store raw key in metadata so we can show it once
-        api_key = Map.put(api_key, :__metadata__, %{raw_key: raw_key})
-
         # Broadcast event for real-time updates
         Phoenix.PubSub.broadcast(
           SmsGateway.PubSub,
@@ -263,7 +250,11 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
           {:api_key_created, api_key}
         )
 
-        {:ok, api_key}
+        # Show the key prefix as placeholder (actual key is already hashed)
+        {:ok,
+         Map.put(api_key, :__metadata__, %{
+           raw_key: api_key.key_prefix <> "... (key was generated)"
+         })}
 
       error ->
         error
@@ -351,8 +342,8 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <!-- Header -->
       <div class="mb-8">
-        <h1 class="text-3xl font-bold text-gray-900">API Keys Management</h1>
-        <p class="mt-2 text-sm text-gray-600">
+        <h1 class="text-3xl font-bold text-base-content">API Keys Management</h1>
+        <p class="mt-2 text-sm text-base-content/60">
           Manage API keys for accessing the SMS Gateway API
         </p>
       </div>
@@ -540,16 +531,16 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
       </div>
 
       <!-- API Keys List -->
-      <div class="bg-white shadow overflow-hidden sm:rounded-lg">
-        <div class="px-4 py-5 sm:px-6 border-b border-gray-200">
-          <h2 class="text-lg font-medium text-gray-900">
+      <div class="bg-base-100 shadow overflow-hidden sm:rounded-lg border border-base-300">
+        <div class="px-4 py-5 sm:px-6 border-b border-base-300">
+          <h2 class="text-lg font-medium text-base-content">
             API Keys (<%= length(@api_keys) %>)
           </h2>
         </div>
 
         <div :if={Enum.empty?(@api_keys)} class="px-4 py-12 text-center">
           <svg
-            class="mx-auto h-12 w-12 text-gray-400"
+            class="mx-auto h-12 w-12 text-base-content/40"
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"
@@ -561,28 +552,28 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
               d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"
             />
           </svg>
-          <h3 class="mt-2 text-sm font-medium text-gray-900">No API keys</h3>
-          <p class="mt-1 text-sm text-gray-500">
+          <h3 class="mt-2 text-sm font-medium text-base-content">No API keys</h3>
+          <p class="mt-1 text-sm text-base-content/50">
             Get started by creating a new API key.
           </p>
         </div>
 
-        <ul :if={!Enum.empty?(@api_keys)} role="list" class="divide-y divide-gray-200">
-          <li :for={api_key <- @api_keys} class="px-4 py-4 sm:px-6 hover:bg-gray-50">
+        <ul :if={!Enum.empty?(@api_keys)} role="list" class="divide-y divide-base-300">
+          <li :for={api_key <- @api_keys} class="px-4 py-4 sm:px-6 hover:bg-base-200">
             <div class="flex items-center justify-between">
               <div class="flex-1 min-w-0">
                 <div class="flex items-center space-x-3">
                   <span class={["badge", if(api_key.is_active, do: "badge-success", else: "badge-ghost")]}>
                     <%= if api_key.is_active, do: "Active", else: "Inactive" %>
                   </span>
-                  <h3 class="text-sm font-medium text-gray-900 truncate">
+                  <h3 class="text-sm font-medium text-base-content truncate">
                     <%= api_key.name %>
                   </h3>
                 </div>
 
-                <div class="mt-2 flex items-center space-x-4 text-sm text-gray-500">
+                <div class="mt-2 flex items-center space-x-4 text-sm text-base-content/50">
                   <div class="flex items-center">
-                    <code class="text-xs bg-gray-100 px-2 py-1 rounded font-mono">
+                    <code class="text-xs bg-base-200 px-2 py-1 rounded font-mono">
                       <%= api_key.key_prefix %>...
                     </code>
                   </div>
