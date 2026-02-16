@@ -16,8 +16,15 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
       socket
       |> assign(:page_title, "API Keys Management")
       |> assign(:show_form, false)
-      |> assign(:form_data, %{"name" => "", "rate_limit" => "100"})
       |> assign(:created_key, nil)
+      |> assign(:loading_action, nil)
+      |> assign(:delete_confirm_key, nil)
+      |> assign(:toast_message, nil)
+      |> assign(:search_query, "")
+      |> assign(:filter_status, :all)
+      |> assign(:page, 1)
+      |> assign(:per_page, 10)
+      |> assign(:total_count, 0)
       |> load_api_keys()
 
     {:ok, socket}
@@ -30,6 +37,8 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
 
   @impl true
   def handle_event("create", %{"api_key" => params}, socket) do
+    socket = assign(socket, loading_action: :creating)
+
     case create_api_key(params) do
       {:ok, api_key} ->
         # Extract the raw key before it's hashed (only shown once)
@@ -39,7 +48,9 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
           socket
           |> assign(:created_key, raw_key)
           |> assign(:show_form, true)
+          |> assign(:loading_action, nil)
           |> load_api_keys()
+          |> show_toast(:success, "API Key created successfully!")
           |> put_flash(
             :info,
             "API Key created successfully! Save it now, it won't be shown again."
@@ -48,9 +59,13 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
         {:noreply, socket}
 
       {:error, changeset} ->
+        error_msg = "Failed to create API Key: #{format_errors(changeset)}"
+
         socket =
           socket
-          |> put_flash(:error, "Failed to create API Key: #{format_errors(changeset)}")
+          |> assign(:loading_action, nil)
+          |> show_toast(:error, error_msg)
+          |> put_flash(:error, error_msg)
 
         {:noreply, socket}
     end
@@ -58,45 +73,101 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
 
   @impl true
   def handle_event("toggle_active", %{"id" => id}, socket) do
+    socket = assign(socket, loading_action: {:toggling, id})
+
     case get_api_key(id) do
       {:ok, api_key} ->
         case toggle_active(api_key) do
           {:ok, _updated} ->
             socket =
               socket
+              |> assign(:loading_action, nil)
               |> load_api_keys()
-              |> put_flash(:info, "API Key updated successfully")
+              |> show_toast(:success, "API Key updated successfully")
 
             {:noreply, socket}
 
           {:error, _} ->
-            {:noreply, put_flash(socket, :error, "Failed to update API Key")}
+            {:noreply,
+             socket
+             |> assign(:loading_action, nil)
+             |> show_toast(:error, "Failed to update API Key")}
         end
 
       {:error, _} ->
-        {:noreply, put_flash(socket, :error, "API Key not found")}
+        {:noreply,
+         socket
+         |> assign(:loading_action, nil)
+         |> show_toast(:error, "API Key not found")}
     end
   end
 
   @impl true
+  def handle_event("search", %{"query" => query}, socket) do
+    {:noreply,
+     socket
+     |> assign(:search_query, query)
+     |> assign(:page, 1)
+     |> load_api_keys()}
+  end
+
+  @impl true
+  def handle_event("filter_status", %{"status" => status}, socket) do
+    status_atom = String.to_existing_atom(status)
+
+    {:noreply,
+     socket
+     |> assign(:filter_status, status_atom)
+     |> assign(:page, 1)
+     |> load_api_keys()}
+  end
+
+  @impl true
+  def handle_event("paginate", %{"page" => page_str}, socket) do
+    page = String.to_integer(page_str)
+    max_page = max(1, ceil(socket.assigns.total_count / socket.assigns.per_page))
+    page = max(1, min(page, max_page))
+
+    {:noreply,
+     socket
+     |> assign(:page, page)
+     |> load_api_keys()}
+  end
+
+  @impl true
+  def handle_event("show_delete_modal", %{"id" => id}, socket) do
+    {:noreply, assign(socket, delete_confirm_key: id)}
+  end
+
+  @impl true
   def handle_event("delete", %{"id" => id}, socket) do
+    socket = assign(socket, loading_action: {:deleting, id})
+
     case get_api_key(id) do
       {:ok, api_key} ->
         case Ash.destroy(api_key) do
           :ok ->
             socket =
               socket
+              |> assign(:loading_action, nil)
+              |> assign(:delete_confirm_key, nil)
               |> load_api_keys()
-              |> put_flash(:info, "API Key deleted successfully")
+              |> show_toast(:success, "API Key deleted successfully")
 
             {:noreply, socket}
 
           {:error, _} ->
-            {:noreply, put_flash(socket, :error, "Failed to delete API Key")}
+            {:noreply,
+             socket
+             |> assign(:loading_action, nil)
+             |> show_toast(:error, "Failed to delete API Key")}
         end
 
       {:error, _} ->
-        {:noreply, put_flash(socket, :error, "API Key not found")}
+        {:noreply,
+         socket
+         |> assign(:loading_action, nil)
+         |> show_toast(:error, "API Key not found")}
     end
   end
 
@@ -110,15 +181,57 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
     {:noreply, load_api_keys(socket)}
   end
 
+  @impl true
+  def handle_info(:dismiss_toast, socket) do
+    {:noreply, assign(socket, toast_message: nil)}
+  end
+
   # Private functions
 
   defp load_api_keys(socket) do
-    api_keys =
-      ApiKey
-      |> Ash.read!()
-      |> Enum.sort_by(& &1.inserted_at, {:desc, DateTime})
+    query = ApiKey
 
-    assign(socket, :api_keys, api_keys)
+    # Apply search filter
+    query =
+      if socket.assigns.search_query != "" do
+        search = "%#{socket.assigns.search_query}%"
+
+        Ash.Query.filter(
+          query,
+          fragment("? ILIKE ?", name, ^search) or
+            fragment("? ILIKE ?", key_prefix, ^search)
+        )
+      else
+        query
+      end
+
+    # Apply status filter
+    query =
+      case socket.assigns.filter_status do
+        :active -> Ash.Query.filter(query, is_active == true)
+        :inactive -> Ash.Query.filter(query, is_active == false)
+        :all -> query
+      end
+
+    # Apply sorting
+    query = Ash.Query.sort(query, inserted_at: :desc)
+
+    # Get total count before pagination
+    total_count = query |> Ash.count!()
+
+    # Apply pagination
+    offset = (socket.assigns.page - 1) * socket.assigns.per_page
+
+    query =
+      query
+      |> Ash.Query.limit(socket.assigns.per_page)
+      |> Ash.Query.offset(offset)
+
+    api_keys = Ash.read!(query)
+
+    socket
+    |> assign(:api_keys, api_keys)
+    |> assign(:total_count, total_count)
   end
 
   defp create_api_key(params) do
@@ -213,6 +326,25 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
     end
   end
 
+  defp show_toast(socket, type, message) do
+    # Schedule auto-dismiss after 3 seconds
+    Process.send_after(self(), :dismiss_toast, 3000)
+
+    assign(socket, toast_message: %{type: type, message: message})
+  end
+
+  defp pagination_range(_current, total) when total <= 7 do
+    1..total
+  end
+
+  defp pagination_range(current, total) do
+    cond do
+      current <= 4 -> 1..5
+      current >= total - 3 -> (total - 4)..total
+      true -> (current - 2)..(current + 2)
+    end
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -225,12 +357,68 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
         </p>
       </div>
 
-      <!-- Flash messages -->
-      <div :if={@flash["info"]} class="mb-4 bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded">
-        <%= @flash["info"] %>
+      <!-- Search and filters -->
+      <div class="card bg-base-100 shadow-sm border border-base-300 mb-6">
+        <div class="card-body p-4">
+          <div class="flex flex-col sm:flex-row gap-3">
+            <!-- Search input -->
+            <div class="flex-1">
+              <label class="input input-bordered flex items-center gap-2">
+                <svg class="w-4 h-4 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                </svg>
+                <input
+                  type="text"
+                  phx-change="search"
+                  phx-debounce="300"
+                  name="query"
+                  value={@search_query}
+                  placeholder="Search by name or prefix..."
+                  class="grow"
+                />
+              </label>
+            </div>
+
+            <!-- Status filter -->
+            <div class="join">
+              <button
+                phx-click="filter_status"
+                phx-value-status="all"
+                class={["btn join-item", if(@filter_status == :all, do: "btn-active")]}
+              >
+                All
+              </button>
+              <button
+                phx-click="filter_status"
+                phx-value-status="active"
+                class={["btn join-item", if(@filter_status == :active, do: "btn-active")]}
+              >
+                Active
+              </button>
+              <button
+                phx-click="filter_status"
+                phx-value-status="inactive"
+                class={["btn join-item", if(@filter_status == :inactive, do: "btn-active")]}
+              >
+                Inactive
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
-      <div :if={@flash["error"]} class="mb-4 bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded">
-        <%= @flash["error"] %>
+
+      <!-- Flash messages -->
+      <div :if={@flash["info"]} class="alert alert-success mb-4">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        <span><%= @flash["info"] %></span>
+      </div>
+      <div :if={@flash["error"]} class="alert alert-error mb-4">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        <span><%= @flash["error"] %></span>
       </div>
 
       <!-- Created Key Display (only shown once) -->
@@ -251,10 +439,13 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
               </code>
               <button
                 type="button"
-                class="ml-2 text-yellow-800 hover:text-yellow-900"
+                class="ml-2 inline-flex items-center gap-1 text-yellow-800 hover:text-yellow-900 font-medium"
                 phx-click={JS.dispatch("phx:copy", to: "#created-key-value")}
               >
-                📋 Copy
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                </svg>
+                Copy
               </button>
               <input type="hidden" id="created-key-value" value={@created_key} />
             </div>
@@ -266,70 +457,86 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
       <div class="mb-6">
         <button
           phx-click="toggle_form"
-          class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+          class={["btn", if(@show_form, do: "btn-ghost", else: "btn-primary")]}
         >
-          <%= if @show_form, do: "❌ Cancel", else: "➕ Create New API Key" %>
+          <svg :if={!@show_form} class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+          </svg>
+          <%= if @show_form, do: "Cancel", else: "Create New API Key" %>
         </button>
       </div>
 
       <!-- Create Form -->
-      <div :if={@show_form} class="mb-8 bg-white shadow rounded-lg p-6">
-        <h2 class="text-lg font-medium text-gray-900 mb-4">Create New API Key</h2>
+      <div :if={@show_form} class="card bg-base-100 shadow-sm border border-base-300 mb-8">
+        <div class="card-body">
+          <h2 class="card-title text-lg">Create New API Key</h2>
 
-        <form phx-submit="create">
-          <div class="space-y-4">
-            <div>
-              <label for="name" class="block text-sm font-medium text-gray-700">
-                Name <span class="text-red-500">*</span>
+          <form phx-submit="create" class="space-y-4">
+            <fieldset class="fieldset">
+              <legend class="fieldset-legend">Key Information</legend>
+
+              <label class="form-control w-full">
+                <div class="label">
+                  <span class="label-text">Name <span class="text-error">*</span></span>
+                </div>
+                <input
+                  type="text"
+                  name="api_key[name]"
+                  id="name"
+                  required
+                  class="input input-bordered w-full"
+                  placeholder="e.g., Mobile App, Zabbix Alerts"
+                />
+                <div class="label">
+                  <span class="label-text-alt text-base-content/60">
+                    A descriptive name to identify this API key
+                  </span>
+                </div>
               </label>
-              <input
-                type="text"
-                name="api_key[name]"
-                id="name"
-                required
-                class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-                placeholder="e.g., Mobile App, Zabbix Alerts"
-              />
-              <p class="mt-1 text-xs text-gray-500">
-                A descriptive name to identify this API key
-              </p>
-            </div>
 
-            <div>
-              <label for="rate_limit" class="block text-sm font-medium text-gray-700">
-                Rate Limit (SMS/hour)
+              <label class="form-control w-full">
+                <div class="label">
+                  <span class="label-text">Rate Limit (SMS/hour)</span>
+                </div>
+                <input
+                  type="number"
+                  name="api_key[rate_limit]"
+                  id="rate_limit"
+                  value="100"
+                  min="1"
+                  max="10000"
+                  class="input input-bordered w-full"
+                />
+                <div class="label">
+                  <span class="label-text-alt text-base-content/60">
+                    Maximum number of SMS per hour
+                  </span>
+                </div>
               </label>
-              <input
-                type="number"
-                name="api_key[rate_limit]"
-                id="rate_limit"
-                value="100"
-                min="1"
-                max="10000"
-                class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-              />
-              <p class="mt-1 text-xs text-gray-500">
-                Maximum number of SMS per hour (leave empty for unlimited)
-              </p>
-            </div>
+            </fieldset>
 
-            <div class="flex justify-end space-x-3">
+            <div class="card-actions justify-end gap-2">
               <button
                 type="button"
                 phx-click="toggle_form"
-                class="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                class="btn btn-ghost"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                class="btn btn-primary"
+                disabled={@loading_action == :creating}
               >
-                🔑 Generate API Key
+                <span :if={@loading_action == :creating} class="loading loading-spinner loading-sm"></span>
+                <svg :if={@loading_action != :creating} class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+                </svg>
+                Generate API Key
               </button>
             </div>
-          </div>
-        </form>
+          </form>
+        </div>
       </div>
 
       <!-- API Keys List -->
@@ -365,14 +572,8 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
             <div class="flex items-center justify-between">
               <div class="flex-1 min-w-0">
                 <div class="flex items-center space-x-3">
-                  <span class={[
-                    "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium",
-                    if(api_key.is_active,
-                      do: "bg-green-100 text-green-800",
-                      else: "bg-gray-100 text-gray-800"
-                    )
-                  ]}>
-                    <%= if api_key.is_active, do: "✅ Active", else: "⏸️ Inactive" %>
+                  <span class={["badge", if(api_key.is_active, do: "badge-success", else: "badge-ghost")]}>
+                    <%= if api_key.is_active, do: "Active", else: "Inactive" %>
                   </span>
                   <h3 class="text-sm font-medium text-gray-900 truncate">
                     <%= api_key.name %>
@@ -386,46 +587,130 @@ defmodule SmsGatewayWeb.Admin.ApiKeysLive do
                     </code>
                   </div>
                   <div>
-                    📊 Rate: <%= api_key.rate_limit || "Unlimited" %> SMS/h
+                    Rate: <%= api_key.rate_limit || "Unlimited" %> SMS/h
                   </div>
                   <div>
-                    🕐 Last used: <%= time_ago(api_key.last_used_at) %>
+                    Last used: <%= time_ago(api_key.last_used_at) %>
                   </div>
                   <div>
-                    📅 Created: <%= format_datetime(api_key.inserted_at) %>
+                    Created: <%= format_datetime(api_key.inserted_at) %>
                   </div>
                 </div>
               </div>
 
-              <div class="flex items-center space-x-2">
+              <div class="flex items-center gap-2">
                 <button
                   phx-click="toggle_active"
                   phx-value-id={api_key.id}
-                  class={[
-                    "inline-flex items-center px-3 py-1 border text-sm font-medium rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500",
-                    if(api_key.is_active,
-                      do:
-                        "border-gray-300 text-gray-700 bg-white hover:bg-gray-50",
-                      else:
-                        "border-green-300 text-green-700 bg-green-50 hover:bg-green-100"
-                    )
-                  ]}
+                  class={["btn btn-sm", if(api_key.is_active, do: "btn-ghost", else: "btn-success")]}
+                  disabled={@loading_action == {:toggling, api_key.id}}
                 >
-                  <%= if api_key.is_active, do: "⏸️ Disable", else: "▶️ Enable" %>
+                  <span :if={@loading_action == {:toggling, api_key.id}} class="loading loading-spinner loading-xs"></span>
+                  <%= if api_key.is_active, do: "Disable", else: "Enable" %>
                 </button>
 
                 <button
-                  phx-click="delete"
+                  phx-click="show_delete_modal"
                   phx-value-id={api_key.id}
-                  data-confirm="Are you sure you want to delete this API key? This action cannot be undone."
-                  class="inline-flex items-center px-3 py-1 border border-red-300 text-sm font-medium rounded-md text-red-700 bg-red-50 hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
+                  class="btn btn-sm btn-error btn-outline"
                 >
-                  🗑️ Delete
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                  </svg>
+                  Delete
                 </button>
               </div>
             </div>
           </li>
         </ul>
+      </div>
+
+      <!-- Pagination -->
+      <div :if={@total_count > @per_page} class="card bg-base-100 shadow-sm border border-base-300 mt-6">
+        <div class="card-body p-4">
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-base-content/60">
+              Showing <%= (@page - 1) * @per_page + 1 %>-<%= min(@page * @per_page, @total_count) %> of <%= @total_count %> keys
+            </span>
+
+            <div class="join">
+              <button
+                phx-click="paginate"
+                phx-value-page={@page - 1}
+                class="join-item btn btn-sm"
+                disabled={@page == 1}
+              >
+                «
+              </button>
+
+              <%= for page_num <- pagination_range(@page, ceil(@total_count / @per_page)) do %>
+                <button
+                  phx-click="paginate"
+                  phx-value-page={page_num}
+                  class={["join-item btn btn-sm", if(@page == page_num, do: "btn-active")]}
+                >
+                  <%= page_num %>
+                </button>
+              <% end %>
+
+              <button
+                phx-click="paginate"
+                phx-value-page={@page + 1}
+                class="join-item btn btn-sm"
+                disabled={@page >= ceil(@total_count / @per_page)}
+              >
+                »
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal confirmation delete -->
+      <dialog :if={@delete_confirm_key} id="delete-confirm-modal" class="modal modal-open">
+        <div class="modal-box">
+          <h3 class="font-bold text-lg">Delete API Key</h3>
+          <p class="py-4">
+            Are you sure you want to delete this API key?
+            <strong class="text-error">This action cannot be undone.</strong>
+          </p>
+          <div class="modal-action">
+            <button
+              phx-click="show_delete_modal"
+              phx-value-id=""
+              class="btn btn-ghost"
+            >
+              Cancel
+            </button>
+            <button
+              phx-click="delete"
+              phx-value-id={@delete_confirm_key}
+              class="btn btn-error"
+              disabled={@loading_action == {:deleting, @delete_confirm_key}}
+            >
+              <span :if={@loading_action == {:deleting, @delete_confirm_key}} class="loading loading-spinner loading-sm"></span>
+              Delete
+            </button>
+          </div>
+        </div>
+        <form method="dialog" class="modal-backdrop">
+          <button phx-click="show_delete_modal" phx-value-id="">close</button>
+        </form>
+      </dialog>
+
+      <!-- Toast notifications -->
+      <div :if={@toast_message} class="toast toast-top toast-end">
+        <div class={[
+          "alert",
+          case @toast_message.type do
+            :success -> "alert-success"
+            :error -> "alert-error"
+            :warning -> "alert-warning"
+            _ -> "alert-info"
+          end
+        ]}>
+          <span><%= @toast_message.message %></span>
+        </div>
       </div>
     </div>
     """
