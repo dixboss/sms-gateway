@@ -9,6 +9,9 @@ defmodule SmsGateway.Repo do
     []
   end
 
-  # Required by AshPostgres 2.6.32+ for atomic actions control
+  # Required by AshPostgres 2.6.32+ and Ash 3.16+ for atomic actions control
   def disable_atomic_actions?, do: false
+
+  # Required by Ash 3.16+ for transaction preference
+  def prefer_transaction?, do: true
 end
