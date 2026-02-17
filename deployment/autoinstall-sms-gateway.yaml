@@ -684,7 +684,7 @@ autoinstall:
       Environment=PHX_SERVER=true
 
       # PostgreSQL connexion
-      Environment=DATABASE_URL=ecto://sms_gateway:SmsGateway2024!@localhost/sms_gateway_prod
+      Environment=DATABASE_URL=ecto://sms_gateway:$mSGWay&CGh!24@localhost/sms_gateway_prod
       Environment=POOL_SIZE=10
 
       # Secret (généré au déploiement)
@@ -745,7 +745,7 @@ autoinstall:
       APP_DIR="/opt/sms-gateway"
       DB_NAME="sms_gateway_prod"
       DB_USER="sms_gateway"
-      DB_PASS="SmsGateway2024!"
+      DB_PASS="$mSGWay&CGh!24"
 
       echo "=== Déploiement SMS Gateway ==="
       echo ""
