@@ -518,26 +518,34 @@ autoinstall:
       CHECKMODEM
     - curtin in-target --target=/target -- chmod +x /usr/local/bin/check-modem.sh
 
-    # Script de monitoring modem pour Zabbix
+    # Script de monitoring SMS Gateway pour Zabbix (via API health check)
     - |
-      cat > /target/etc/zabbix/zabbix_agent2.d/modem-check.conf << 'MODEMCHECK'
-      # Monitoring modem Huawei via UserParameter
+      cat > /target/etc/zabbix/zabbix_agent2.d/sms-gateway-check.conf << 'SMSCHECK'
+      # Monitoring SMS Gateway via API /api/health
+      # L'API retourne le statut global incluant le modem, la DB et la queue
 
-      # Signal strength (0-100)
-      UserParameter=modem.signal,curl -s http://192.168.8.1/api/monitoring/status 2>/dev/null | grep -oP '(?<=<SignalStrength>)[^<]+' || echo 0
+      # API health status (0=down, 1=degraded/up)
+      # Retourne 1 si l'API répond (même en "degraded"), 0 si down
+      UserParameter=sms_gateway.api.up,curl -s -f http://localhost:4000/api/health 2>/dev/null >/dev/null && echo 1 || echo 0
 
-      # Network type (3G/4G/LTE)
-      UserParameter=modem.network,curl -s http://192.168.8.1/api/monitoring/status 2>/dev/null | grep -oP '(?<=<CurrentNetworkType>)[^<]+' || echo "UNKNOWN"
+      # Status général (healthy=2, degraded=1, down=0)
+      UserParameter=sms_gateway.status,STATUS=$(curl -s http://localhost:4000/api/health 2>/dev/null | jq -r '.status // "down"'); case "$STATUS" in "healthy") echo 2;; "degraded") echo 1;; *) echo 0;; esac
 
-      # Connection status (0=disconnected, 1=connected)
-      UserParameter=modem.connected,ping -c 1 -W 2 192.168.8.1 >/dev/null 2>&1 && echo 1 || echo 0
+      # Modem connecté (1=connected, 0=disconnected) - extrait de l'API health
+      UserParameter=sms_gateway.modem.connected,curl -s http://localhost:4000/api/health 2>/dev/null | jq -r '.modem.connected // false' | grep -q 'true' && echo 1 || echo 0
 
-      # SMS Gateway API health (0=down, 1=up)
-      UserParameter=sms_gateway.health,curl -s http://localhost:4000/api/health 2>/dev/null | grep -q '"status":"healthy"' && echo 1 || echo 0
+      # Database connectée (1=connected, 0=disconnected)
+      UserParameter=sms_gateway.database.connected,curl -s http://localhost:4000/api/health 2>/dev/null | jq -r '.database // "disconnected"' | grep -q 'connected' && echo 1 || echo 0
 
       # SMS queue pending count
-      UserParameter=sms_gateway.queue_pending,curl -s http://localhost:4000/api/health 2>/dev/null | jq -r '.queue.pending // 0'
-      MODEMCHECK
+      UserParameter=sms_gateway.queue.pending,curl -s http://localhost:4000/api/health 2>/dev/null | jq -r '.queue.pending // 0'
+
+      # SMS queue executing count
+      UserParameter=sms_gateway.queue.executing,curl -s http://localhost:4000/api/health 2>/dev/null | jq -r '.queue.executing // 0'
+
+      # Modem error message (pour alertes)
+      UserParameter=sms_gateway.modem.error,curl -s http://localhost:4000/api/health 2>/dev/null | jq -r '.modem.error // ""'
+      SMSCHECK
 
     # ============================================================================
     # CONFIGURATION NGINX

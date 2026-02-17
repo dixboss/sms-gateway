@@ -1,7 +1,18 @@
 defmodule SmsGateway.Sms.ApiKey do
   use Ash.Resource,
     domain: SmsGateway.Sms,
-    data_layer: AshPostgres.DataLayer
+    data_layer: AshPostgres.DataLayer,
+    extensions: [AshAdmin.Resource]
+
+  admin do
+    table_columns([:name, :key_prefix, :is_active, :rate_limit, :last_used_at, :inserted_at])
+
+    form do
+      field :name
+      field :rate_limit
+      # key_hash and key_prefix are generated automatically by :create action
+    end
+  end
 
   postgres do
     table("api_keys")
@@ -43,7 +54,7 @@ defmodule SmsGateway.Sms.ApiKey do
   end
 
   actions do
-    defaults([:create, :read, :update, :destroy])
+    defaults([:read, :update, :destroy])
 
     read :list do
       filter(expr(is_active == true))
@@ -58,21 +69,18 @@ defmodule SmsGateway.Sms.ApiKey do
       get?(true)
     end
 
-    create :create_key do
-      argument :name, :string do
-        allow_nil?(false)
-        constraints(max_length: 255)
-      end
-
-      argument(:rate_limit, :integer)
+    # Custom create action that generates key_hash and key_prefix automatically
+    create :create do
+      accept([:name, :rate_limit])
 
       change(fn changeset, _context ->
-        name = Ash.Changeset.get_argument(changeset, :name)
-        rate_limit = Ash.Changeset.get_argument(changeset, :rate_limit)
+        name = Ash.Changeset.get_attribute(changeset, :name)
+        rate_limit = Ash.Changeset.get_attribute(changeset, :rate_limit)
 
         # Generate a new secret key (32 bytes random)
         secret_key = :crypto.strong_rand_bytes(32) |> Base.encode16(case: :lower)
-        prefix = "sk_live_" <> String.slice(secret_key, 0..16)
+        # Prefix: "sk_live_" (8 chars) + 11 chars = 19 chars total (under 20 limit)
+        prefix = "sk_live_" <> String.slice(secret_key, 0..10)
         key_hash = Bcrypt.hash_pwd_salt(secret_key)
 
         changeset

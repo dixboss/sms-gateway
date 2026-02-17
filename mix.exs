@@ -57,6 +57,7 @@ defmodule SmsGateway.MixProject do
       {:ash_postgres, "~> 2.5"},
       {:ash_phoenix, "~> 2.1"},
       {:ash_json_api, "~> 1.4"},
+      {:ash_admin, "~> 0.11"},
       # Oban for job queue
       {:oban, "~> 2.18"},
       # HTTP client for Huawei modem

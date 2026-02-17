@@ -1,7 +1,18 @@
 defmodule SmsGateway.Sms.Message do
   use Ash.Resource,
     domain: SmsGateway.Sms,
-    data_layer: AshPostgres.DataLayer
+    data_layer: AshPostgres.DataLayer,
+    extensions: [AshAdmin.Resource]
+
+  admin do
+    table_columns([:direction, :phone_number, :content, :status, :sent_at, :inserted_at])
+
+    form do
+      field :direction
+      field :phone_number
+      field :content
+    end
+  end
 
   postgres do
     table("messages")
