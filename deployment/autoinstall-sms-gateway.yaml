@@ -612,7 +612,7 @@ autoinstall:
               proxy_set_header X-Forwarded-Proto $scheme;
               proxy_set_header X-Forwarded-Port $server_port;
 
-              # WebSocket support (Phoenix LiveDashboard)
+              # WebSocket support (AshAdmin LiveView)
               proxy_set_header Upgrade $http_upgrade;
               proxy_set_header Connection "upgrade";
 
@@ -821,7 +821,7 @@ autoinstall:
           echo "=== Service actif ==="
           echo "  URL API: https://cgh-smsg.congo-handling.aero/sms/api/v1/messages"
           echo "  Health:  https://cgh-smsg.congo-handling.aero/sms/api/health"
-          echo "  Dashboard: https://cgh-smsg.congo-handling.aero/sms/dashboard"
+          echo "  Admin:   https://cgh-smsg.congo-handling.aero/sms/admin"
           echo ""
           echo "  Logs: sudo journalctl -u sms-gateway -f"
           echo "  Status: sudo systemctl status sms-gateway"
