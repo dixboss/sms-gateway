@@ -668,7 +668,6 @@ autoinstall:
       cat > /target/etc/systemd/system/sms-gateway.service << 'SYSTEMD'
       [Unit]
       Description=SMS Gateway Phoenix Application
-      Documentation=https://github.com/your-repo/sms-gateway
       After=network.target postgresql.service
       Requires=postgresql.service
 
