@@ -198,8 +198,8 @@ autoinstall:
     # Installer Zabbix Server PostgreSQL, Frontend PHP, Agent2
     - curtin in-target --target=/target -- apt-get install -y zabbix-server-pgsql zabbix-frontend-php zabbix-nginx-conf zabbix-sql-scripts zabbix-agent2
 
-    # Créer DB Zabbix avec mot de passe automatique
-    - curtin in-target --target=/target -- su - postgres -c "psql -c \"CREATE USER zabbix WITH PASSWORD 'ZabbixSecure2024!';\""
+    # Créer DB Zabbix avec mot de passe sécurisé
+    - curtin in-target --target=/target -- su - postgres -c "psql -c \"CREATE USER zabbix WITH PASSWORD 'Z@bb1X&CGh!24';\""
     - curtin in-target --target=/target -- su - postgres -c "psql -c \"CREATE DATABASE zabbix OWNER zabbix;\""
     - curtin in-target --target=/target -- su - postgres -c "zcat /usr/share/zabbix-sql-scripts/postgresql/server.sql.gz | psql -U postgres zabbix"
 
@@ -213,7 +213,7 @@ autoinstall:
       DBHost=localhost
       DBName=zabbix
       DBUser=zabbix
-      DBPassword=ZabbixSecure2024!
+      DBPassword=Z@bb1X&CGh!24
       StartPollers=10
       StartPollersUnreachable=5
       StartTrappers=5
