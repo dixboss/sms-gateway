@@ -267,9 +267,9 @@ defmodule SmsGateway.Modem.Client do
     ]
 
     # Use Req (Finch adapter - 100% Elixir) with CurlReq debugging
-    Req.new(url: url, headers: headers, body: body, receive_timeout: @timeout)
+    Req.new(method: :post, url: url, headers: headers, body: body, receive_timeout: @timeout)
     |> CurlReq.inspect(label: "Modem Send SMS")
-    |> Req.post()
+    |> Req.request()
   end
 
   defp list_sms_impl(box_type) do
