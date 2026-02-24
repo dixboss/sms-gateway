@@ -236,15 +236,15 @@ defmodule SmsGateway.Modem.Client do
 
   defp build_sms_xml(phone_number, content) do
     length = String.length(content)
-    time = DateTime.utc_now() |> DateTime.to_string()
+    # Format date as ISO8601 without microseconds (modem requirement)
+    time = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
+    # Compact XML format (no extra whitespace) - modem is strict about formatting
     xml = """
     <?xml version="1.0" encoding="UTF-8"?>
     <request>
       <Index>-1</Index>
-      <Phones>
-        <Phone>#{phone_number}</Phone>
-      </Phones>
+      <Phones><Phone>#{phone_number}</Phone></Phones>
       <Sca></Sca>
       <Content>#{content}</Content>
       <Length>#{length}</Length>
@@ -261,15 +261,34 @@ defmodule SmsGateway.Modem.Client do
     host = URI.parse(base_url).host || "192.168.8.1"
 
     headers = [
-      {"Content-Type", "application/xml"},
-      {"__RequestVerificationToken", token},
-      {"Host", host}
+      {"content-type", "application/xml"},
+      {"__requestverificationtoken", token},
+      {"host", host}
     ]
 
-    # Use Req (Finch adapter - 100% Elixir) with CurlReq debugging
-    Req.new(method: :post, url: url, headers: headers, body: body, receive_timeout: @timeout)
-    |> CurlReq.inspect(label: "Modem Send SMS")
-    |> Req.request()
+    # Use Finch directly (100% Elixir) to avoid Req auto-encoding
+    # Build request manually
+    request =
+      Finch.build(:post, url, headers, body)
+
+    # Log the curl equivalent for debugging
+    header_str = Enum.map_join(headers, " ", fn {k, v} -> ~s(-H "#{k}: #{v}") end)
+
+    # Log FULL XML body to debug phone number issue
+    Logger.info("Modem Send SMS - Full XML body:")
+    Logger.info(body)
+
+    Logger.info(
+      "Modem Send SMS: curl #{header_str} -d '#{String.slice(body, 0..200)}...' -X POST \"#{url}\""
+    )
+
+    case Finch.request(request, SmsGateway.Finch, receive_timeout: @timeout) do
+      {:ok, %Finch.Response{status: status, body: response_body}} ->
+        {:ok, %{status: status, body: response_body}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp list_sms_impl(box_type) do
