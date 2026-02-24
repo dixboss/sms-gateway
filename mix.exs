@@ -60,8 +60,8 @@ defmodule SmsGateway.MixProject do
       {:ash_admin, "~> 0.11"},
       # Oban for job queue
       {:oban, "~> 2.18"},
-      # HTTP client for Huawei modem
-      {:httpoison, "~> 2.2"},
+      # CurlReq for debugging HTTP requests (shows equivalent curl commands)
+      {:curl_req, "~> 0.2"},
       # XML parsing for modem responses
       {:sweet_xml, "~> 0.7"},
       # Password hashing for API keys
@@ -81,7 +81,12 @@ defmodule SmsGateway.MixProject do
       "ecto.setup": ["ecto.create", "ecto.migrate", "run priv/repo/seeds.exs"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
       test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
+      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"],
+      "assets.build": ["cmd --cd assets npm run build"],
+      "assets.deploy": [
+        "cmd --cd assets npm install --prefer-offline --no-audit --progress=false --loglevel=error",
+        "cmd --cd assets npm run deploy"
+      ]
     ]
   end
 end

@@ -78,7 +78,7 @@ defmodule SmsGateway.Workers.SendSms do
   end
 
   defp mark_sending(message) do
-    case Ash.update(message, %{status: :sending}) do
+    case Ash.update(message, %{}, action: :mark_sending) do
       {:ok, _updated} ->
         :ok
 
@@ -152,11 +152,8 @@ defmodule SmsGateway.Workers.SendSms do
       {:error, {:http_error, status_code}} ->
         classify_http_error(status_code)
 
-      {:error, %HTTPoison.Error{reason: :timeout}} ->
+      {:error, :timeout} ->
         {:error, {:retryable, :timeout}}
-
-      {:error, %HTTPoison.Error{reason: reason}} ->
-        {:error, {:retryable, reason}}
 
       {:error, reason} ->
         classify_modem_error(reason)

@@ -2,6 +2,8 @@ defmodule SmsGateway.Modem.Client do
   @moduledoc """
   HTTP client for Huawei E303 modem with circuit breaker pattern and session token management.
 
+  Uses Req HTTP client (Finch adapter) - 100% Elixir HTTP client
+
   Provides functions to:
   - Send SMS via modem API (with XML request format)
   - List incoming SMS messages
@@ -15,9 +17,9 @@ defmodule SmsGateway.Modem.Client do
   - :half_open (testing if modem is back online)
 
   Session Token Management:
-  - Session info (SessionID + TokInfo) is fetched from /api/webserver/SesTokInfo
-  - Both values are cached in ETS with TTL (5 minutes)
-  - All requests include Cookie (SessionID) and __RequestVerificationToken (TokInfo) headers
+  - Token is fetched from /api/webserver/token
+  - Token is cached in ETS with TTL (5 minutes)
+  - All requests include __RequestVerificationToken header with the token
   - Host header is included for broader modem compatibility (E3372, E3372h, E3131, E303)
   """
 
@@ -135,11 +137,11 @@ defmodule SmsGateway.Modem.Client do
     ensure_token_cache_table()
 
     case :ets.lookup(@token_cache_key, :session) do
-      [{:session, {session_id, token}, expires_at}] ->
+      [{:session, token, expires_at}] ->
         if System.monotonic_time(:millisecond) < expires_at do
-          {:ok, {session_id, token}}
+          {:ok, token}
         else
-          Logger.debug("Session expired, fetching new one")
+          Logger.debug("Token expired, fetching new one")
           fetch_new_token()
         end
 
@@ -150,47 +152,48 @@ defmodule SmsGateway.Modem.Client do
 
   defp fetch_new_token do
     base_url = config(:modem_base_url, "http://192.168.8.1")
-    url = "#{base_url}/api/webserver/SesTokInfo"
+    url = "#{base_url}/api/webserver/token"
 
     # Extract host from base_url for Host header
     host = URI.parse(base_url).host || "192.168.8.1"
-    headers = [{"Host", host}]
 
-    case HTTPoison.get(url, headers, timeout: @timeout) do
-      {:ok, %{status_code: 200, body: body}} ->
-        case parse_session_response(body) do
-          {:ok, {session_id, token}} ->
-            cache_session(session_id, token)
-            {:ok, {session_id, token}}
+    # Use Req (Finch adapter - 100% Elixir) with CurlReq debugging
+    result =
+      Req.new(url: url, headers: [{"Host", host}], receive_timeout: @timeout)
+      |> CurlReq.inspect(label: "Modem Token Request")
+      |> Req.get()
+
+    case result do
+      {:ok, %{status: 200, body: body}} ->
+        case parse_token_response(body) do
+          {:ok, token} ->
+            cache_token(token)
+            {:ok, token}
 
           {:error, reason} ->
-            Logger.error("Failed to parse session info: #{inspect(reason)}")
-            {:error, :session_parse_failed}
+            Logger.error("Failed to parse token: #{inspect(reason)}")
+            {:error, :token_parse_failed}
         end
 
-      {:ok, %{status_code: status}} ->
-        Logger.error("Session request failed with status: #{status}")
+      {:ok, %{status: status}} ->
+        Logger.error("Token request failed with status: #{status}")
         {:error, {:http_error, status}}
 
       {:error, reason} ->
-        Logger.error("Session request failed: #{inspect(reason)}")
+        Logger.error("Token request failed: #{inspect(reason)}")
         {:error, reason}
     end
   end
 
-  defp parse_session_response(body) do
+  defp parse_token_response(body) do
     try do
-      session_id = xpath(body, ~x"//response/SesInfo/text()"s)
-      token = xpath(body, ~x"//response/TokInfo/text()"s)
+      token = xpath(body, ~x"//response/token/text()"s)
 
-      if session_id && session_id != "" && token && token != "" do
-        {:ok, {session_id, token}}
+      if token && token != "" do
+        {:ok, token}
       else
-        Logger.error(
-          "Missing session info - SesInfo: #{inspect(session_id)}, TokInfo: #{inspect(token)}"
-        )
-
-        {:error, :session_info_not_found}
+        Logger.error("Missing token in response")
+        {:error, :token_not_found}
       end
     rescue
       e ->
@@ -199,14 +202,12 @@ defmodule SmsGateway.Modem.Client do
     end
   end
 
-  defp cache_session(session_id, token) do
+  defp cache_token(token) do
     ensure_token_cache_table()
     expires_at = System.monotonic_time(:millisecond) + @token_ttl
-    :ets.insert(@token_cache_key, {:session, {session_id, token}, expires_at})
+    :ets.insert(@token_cache_key, {:session, token, expires_at})
 
-    Logger.debug(
-      "Session info cached until #{expires_at} - SessionID: #{String.slice(session_id, 0..10)}..., Token: #{String.slice(token, 0..10)}..."
-    )
+    Logger.debug("Token cached until #{expires_at} - Token: #{String.slice(token, 0..10)}...")
   end
 
   defp ensure_token_cache_table do
@@ -223,9 +224,9 @@ defmodule SmsGateway.Modem.Client do
     base_url = config(:modem_base_url, "http://192.168.8.1")
     url = "#{base_url}/api/sms/send-sms"
 
-    with {:ok, {session_id, token}} <- get_session_token(),
+    with {:ok, token} <- get_session_token(),
          {:ok, xml_body} <- build_sms_xml(phone_number, content),
-         {:ok, response} <- send_authenticated_request(url, xml_body, session_id, token),
+         {:ok, response} <- send_authenticated_request(url, xml_body, token),
          {:ok, message_id} <- parse_send_sms_response(response.body) do
       {:ok, message_id}
     else
@@ -255,26 +256,28 @@ defmodule SmsGateway.Modem.Client do
     {:ok, xml}
   end
 
-  defp send_authenticated_request(url, body, session_id, token) do
+  defp send_authenticated_request(url, body, token) do
     base_url = config(:modem_base_url, "http://192.168.8.1")
     host = URI.parse(base_url).host || "192.168.8.1"
 
     headers = [
       {"Content-Type", "application/xml"},
-      {"Cookie", session_id},
       {"__RequestVerificationToken", token},
       {"Host", host}
     ]
 
-    HTTPoison.post(url, body, headers, timeout: @timeout)
+    # Use Req (Finch adapter - 100% Elixir) with CurlReq debugging
+    Req.new(url: url, headers: headers, body: body, receive_timeout: @timeout)
+    |> CurlReq.inspect(label: "Modem Send SMS")
+    |> Req.post()
   end
 
   defp list_sms_impl(box_type) do
     base_url = config(:modem_base_url, "http://192.168.8.1")
     url = "#{base_url}/api/sms/sms-list?page=1&count=20&box_type=#{box_type}"
 
-    with {:ok, {session_id, token}} <- get_session_token(),
-         {:ok, response} <- send_authenticated_get(url, session_id, token),
+    with {:ok, token} <- get_session_token(),
+         {:ok, response} <- send_authenticated_get(url, token),
          {:ok, messages} <- parse_list_sms_response(response.body) do
       {:ok, messages}
     else
@@ -282,25 +285,27 @@ defmodule SmsGateway.Modem.Client do
     end
   end
 
-  defp send_authenticated_get(url, session_id, token) do
+  defp send_authenticated_get(url, token) do
     base_url = config(:modem_base_url, "http://192.168.8.1")
     host = URI.parse(base_url).host || "192.168.8.1"
 
     headers = [
-      {"Cookie", session_id},
       {"__RequestVerificationToken", token},
       {"Host", host}
     ]
 
-    HTTPoison.get(url, headers, timeout: @timeout)
+    # Use Req (Finch adapter - 100% Elixir) with CurlReq debugging
+    Req.new(url: url, headers: headers, receive_timeout: @timeout)
+    |> CurlReq.inspect(label: "Modem Authenticated GET")
+    |> Req.get()
   end
 
   defp get_status_impl(modem_message_id) do
     base_url = config(:modem_base_url, "http://192.168.8.1")
     url = "#{base_url}/api/sms/send-status?message_id=#{modem_message_id}"
 
-    with {:ok, {session_id, token}} <- get_session_token(),
-         {:ok, response} <- send_authenticated_get(url, session_id, token),
+    with {:ok, token} <- get_session_token(),
+         {:ok, response} <- send_authenticated_get(url, token),
          {:ok, status} <- parse_get_status_response(response.body) do
       {:ok, status}
     else
@@ -312,8 +317,8 @@ defmodule SmsGateway.Modem.Client do
     base_url = config(:modem_base_url, "http://192.168.8.1")
     url = "#{base_url}/api/monitoring/status"
 
-    with {:ok, {session_id, token}} <- get_session_token(),
-         {:ok, response} <- send_authenticated_get(url, session_id, token),
+    with {:ok, token} <- get_session_token(),
+         {:ok, response} <- send_authenticated_get(url, token),
          {:ok, health_info} <- parse_health_check_response(response.body) do
       {:ok, health_info}
     else
@@ -327,12 +332,21 @@ defmodule SmsGateway.Modem.Client do
 
   defp parse_send_sms_response(body) do
     try do
+      # Try to get message_id first
       message_id = xpath(body, ~x"//response/message_id/text()"s)
 
       if message_id && message_id != "" do
         {:ok, message_id}
       else
-        {:error, :invalid_response}
+        # Some modems (E303) just return <response>OK</response> without message_id
+        response_text = xpath(body, ~x"//response/text()"s)
+
+        if response_text =~ ~r/OK/i do
+          # Generate a local message_id when modem doesn't provide one
+          {:ok, "local_#{System.unique_integer([:positive])}"}
+        else
+          {:error, :invalid_response}
+        end
       end
     rescue
       _ -> {:error, :parse_error}
